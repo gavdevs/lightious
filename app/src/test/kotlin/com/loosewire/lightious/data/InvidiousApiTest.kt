@@ -11,6 +11,64 @@ import kotlin.test.assertTrue
 
 class InvidiousApiTest {
     @Test
+    fun `paired channel feed preserves release timestamps and partial failures without pagination`() = runTest {
+        val transport = FakeTransport(getResponse = { url, parameters ->
+            assertEquals("https://invidious.example/api/lightious/v1/channel-feed", url)
+            assertTrue(parameters.isEmpty())
+            InvidiousHttpResponse(
+                200,
+                """
+                {
+                  "videos":[
+                    {"videoId":"dQw4w9WgXcQ","authorId":"$CHANNEL_ID","published":"1720000000"},
+                    {"videoId":"aqz-KE-bpKQ","authorId":"$CHANNEL_ID","published":1720000001,"isUpcoming":true},
+                    {"videoId":"m8KnrXli-bA","authorId":"$CHANNEL_ID","premiereTimestamp":1720000002},
+                    {"videoId":"9bZkp7q19f0","authorId":"$CHANNEL_ID","isShort":true}
+                  ],
+                  "failedChannelIds":["$CHANNEL_ID"]
+                }
+                """.trimIndent(),
+            )
+        })
+        InvidiousApi("https://invidious.example", deviceBearer = DEVICE_BEARER, transport = transport).use { api ->
+            val page = api.channelFeed().getOrThrow()
+
+            assertEquals(listOf("dQw4w9WgXcQ", "aqz-KE-bpKQ", "m8KnrXli-bA"), page.videos.map(VideoSummary::videoId))
+            assertEquals(1720000000L, page.videos.first().published)
+            assertFalse(page.videos.first().isUpcoming)
+            assertTrue(page.videos[1].isUpcoming)
+            assertTrue(page.videos[2].isUpcoming)
+            assertEquals(listOf(CHANNEL_ID), page.failedChannelIds)
+            assertEquals("Bearer $DEVICE_BEARER", transport.requests.single().headers["Authorization"])
+        }
+    }
+
+    @Test
+    fun `channel feed requires pairing and reports malformed or failed responses`() = runTest {
+        val unused = FakeTransport(getResponse = { _, _ -> error("Unpaired feed must not send a request.") })
+        InvidiousApi("https://invidious.example", transport = unused).use { api ->
+            assertTrue(api.channelFeed().isFailure)
+            assertTrue(unused.requests.isEmpty())
+        }
+        listOf(
+            InvidiousHttpResponse(200, "{}"),
+            InvidiousHttpResponse(200, """{"videos":[],"failedChannelIds":["invalid"]}"""),
+            InvidiousHttpResponse(503, "Unavailable"),
+        ).forEach { response ->
+            InvidiousApi(
+                "https://invidious.example",
+                deviceBearer = DEVICE_BEARER,
+                transport = FakeTransport(getResponse = { _, _ -> response }),
+            ).use { api -> assertTrue(api.channelFeed().isFailure) }
+        }
+        InvidiousApi(
+            "https://invidious.example",
+            deviceBearer = DEVICE_BEARER,
+            transport = FakeTransport(getResponse = { _, _ -> throw CancellationException("leave feed") }),
+        ).use { api -> assertFailsWith<CancellationException> { api.channelFeed() } }
+    }
+
+    @Test
     fun `search ignores non-video results and accepts flexible numbers`() = runTest {
         val transport = FakeTransport(
             getResponse = { url, _ ->
@@ -108,6 +166,74 @@ class InvidiousApiTest {
     }
 
     @Test
+    fun `paired channel search is scoped and maps a next page`() = runTest {
+        val transport = FakeTransport(
+            getResponse = { url, parameters ->
+                check(url.endsWith("/api/lightious/v1/channels/$CHANNEL_ID/search"))
+                assertEquals("sleep stories", parameters["q"])
+                assertEquals("2", parameters["page"])
+                InvidiousHttpResponse(
+                    200,
+                    """
+                    {
+                      "videos":[{
+                        "type":"video",
+                        "videoId":"dQw4w9WgXcQ",
+                        "title":"A channel video",
+                        "author":"A channel",
+                        "authorId":"$CHANNEL_ID"
+                      },{
+                        "type":"video",
+                        "videoId":"aqz-KE-bpKQ",
+                        "title":"A different channel",
+                        "authorId":"UCBJycsmduvYEL83R_U4JriQ"
+                      },{
+                        "type":"shortVideo",
+                        "videoId":"m8KnrXli-bA",
+                        "title":"A Short",
+                        "authorId":"$CHANNEL_ID"
+                      }],
+                      "nextPage":3
+                    }
+                    """.trimIndent(),
+                )
+            },
+        )
+        val api = InvidiousApi(
+            baseUrl = "https://invidious.example",
+            deviceBearer = DEVICE_BEARER,
+            transport = transport,
+        )
+
+        val result = api.channelSearch(CHANNEL_ID, "  sleep stories  ", page = 2).getOrThrow()
+
+        assertEquals(listOf("dQw4w9WgXcQ"), result.videos.map(VideoSummary::videoId))
+        assertEquals(3, result.nextPage)
+        assertEquals("Bearer $DEVICE_BEARER", transport.requests.single().headers["Authorization"])
+        api.close()
+    }
+
+    @Test
+    fun `channel search rejects unpaired malformed and oversized requests before transport`() = runTest {
+        val transport = FakeTransport(getResponse = { url, _ -> error("Unexpected GET: $url") })
+        val unpaired = InvidiousApi("https://invidious.example", transport = transport)
+        val paired = InvidiousApi(
+            baseUrl = "https://invidious.example",
+            deviceBearer = DEVICE_BEARER,
+            transport = transport,
+        )
+
+        assertTrue(unpaired.channelSearch(CHANNEL_ID, "test").isFailure)
+        assertTrue(paired.channelSearch("not-a-channel", "test").isFailure)
+        assertTrue(paired.channelSearch(CHANNEL_ID, "   ").isFailure)
+        assertTrue(paired.channelSearch(CHANNEL_ID, "x".repeat(257)).isFailure)
+        assertTrue(paired.channelSearch(CHANNEL_ID, "test", page = 0).isFailure)
+        assertTrue(transport.requests.isEmpty())
+        unpaired.close()
+        paired.close()
+    }
+
+    @Test
     fun `Shorts URLs are ignored without requesting search or video details`() = runTest {
         val transport = FakeTransport(getResponse = { url, _ -> error("Unexpected GET: $url") })
         val api = InvidiousApi("https://invidious.example", transport = transport)
@@ -191,6 +317,8 @@ class InvidiousApiTest {
                             200,
                             """{"videos":[{"type":"video","videoId":"dQw4w9WgXcQ","title":"A video","authorId":"$CHANNEL_ID"}]}""",
                         )
+                    url.endsWith("/api/lightious/v1/channels/$CHANNEL_ID/search") ->
+                        InvidiousHttpResponse(200, """{"videos":[]}""")
                     url.endsWith("/api/lightious/v1/videos/dQw4w9WgXcQ") ->
                         InvidiousHttpResponse(200, VIDEO_DETAILS_JSON)
                     else -> error("Unexpected URL: $url")
@@ -213,6 +341,7 @@ class InvidiousApiTest {
         api.accountFeed("").getOrThrow()
         api.accountHistoryIds("", maxResults = 5).getOrThrow()
         api.channelVideos(CHANNEL_ID).getOrThrow()
+        api.channelSearch(CHANNEL_ID, "kittens").getOrThrow()
         api.video("dQw4w9WgXcQ").getOrThrow()
         api.markWatched("", "dQw4w9WgXcQ").getOrThrow()
 

@@ -24,7 +24,6 @@ import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.ui.LightBarButton
-import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightFullscreenModal
 import com.thelightphone.sdk.ui.LightIcons
 import com.thelightphone.sdk.ui.LightScrollView
@@ -43,6 +42,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface FocusedChannelMode {
     data object Loading : FocusedChannelMode
@@ -75,6 +75,48 @@ class FocusedChannelViewModel(
         load()
     }
 
+    fun onShow() {
+        val loaded = _uiState.value.mode as? FocusedChannelMode.Loaded ?: return
+        requestJob?.cancel()
+        _uiState.update { it.copy(mode = FocusedChannelMode.Loading, errorMessage = null) }
+        requestJob = viewModelScope.launch {
+            val companion = withContext(Dispatchers.IO) {
+                services.companion.loadActiveState(settings.instanceUrl)
+            }.getOrElse { error ->
+                _uiState.update {
+                    it.copy(mode = FocusedChannelMode.Failed(error.userMessage("Could not verify channel access.")))
+                }
+                return@launch
+            }
+            val profile = companion.profile
+            if (profile?.mode != ExperienceMode.LIBRARY) {
+                _uiState.update {
+                    it.copy(mode = FocusedChannelMode.Failed("Channel browsing is available in Library mode."))
+                }
+                return@launch
+            }
+            val channel = profile.focusedChannels().firstOrNull { it.channelId == initialChannelId }
+            if (channel == null) {
+                _uiState.update {
+                    it.copy(mode = FocusedChannelMode.Failed("This channel is no longer in your library."))
+                }
+                return@launch
+            }
+            val uploads = loaded.latestUploads.takeIf { channel.allowsWholeChannel }.orEmpty()
+            _uiState.update {
+                it.copy(
+                    mode = loaded.copy(
+                        channel = channel,
+                        latestUploads = uploads,
+                        videos = channel.videosWithPolicy(uploads),
+                        continuation = loaded.continuation.takeIf { channel.allowsWholeChannel },
+                        loadingMore = false,
+                    ),
+                )
+            }
+        }
+    }
+
     fun load() {
         requestJob?.cancel()
         _uiState.update { state -> state.copy(mode = FocusedChannelMode.Loading, errorMessage = null) }
@@ -91,9 +133,9 @@ class FocusedChannelViewModel(
                 }
                 return@launch
             }
-            if (profile.mode != ExperienceMode.FOCUSED) {
+            if (profile.mode != ExperienceMode.LIBRARY) {
                 _uiState.update {
-                    it.copy(mode = FocusedChannelMode.Failed("Focused mode is no longer enabled."))
+                    it.copy(mode = FocusedChannelMode.Failed("Channel browsing is available in Library mode."))
                 }
                 return@launch
             }
@@ -173,9 +215,9 @@ class FocusedChannelViewModel(
                 }
                 return@launch
             }
-            if (profile.mode != ExperienceMode.FOCUSED) {
+            if (profile.mode != ExperienceMode.LIBRARY) {
                 _uiState.update {
-                    it.copy(mode = FocusedChannelMode.Failed("Focused mode is no longer enabled."))
+                    it.copy(mode = FocusedChannelMode.Failed("Channel browsing is available in Library mode."))
                 }
                 return@launch
             }
@@ -259,6 +301,10 @@ class FocusedChannelScreen(
 
     override fun createViewModel() = FocusedChannelViewModel(services, settings, channelId)
 
+    override fun willShow() {
+        viewModel.onShow()
+    }
+
     @Composable
     override fun Content() {
         val colors by LightThemeController.colors.collectAsState()
@@ -279,9 +325,9 @@ class FocusedChannelScreen(
                         ),
                         center = LightTopBarCenter.Text("Channel"),
                         rightButton = LightBarButton.LightIcon(
-                            icon = LightIcons.REFRESH,
-                            onClick = viewModel::load,
-                            contentDescription = "Refresh",
+                            icon = LightIcons.ELLIPSES,
+                            onClick = { openOptions(state) },
+                            contentDescription = "Channel options",
                         ),
                     )
                     when (val mode = state.mode) {
@@ -293,7 +339,6 @@ class FocusedChannelScreen(
                         is FocusedChannelMode.Loaded -> FocusedChannelContent(
                             mode = mode,
                             selectedFilter = state.filter,
-                            onFilter = viewModel::selectFilter,
                             onMore = viewModel::loadMore,
                             onVideo = { video ->
                                 navigateTo(
@@ -311,13 +356,51 @@ class FocusedChannelScreen(
             }
         }
     }
+
+    private fun openOptions(state: FocusedChannelUiState) {
+        val loaded = state.mode as? FocusedChannelMode.Loaded
+        navigateTo(
+            screenFactory = { activity ->
+                FocusedOptionsScreen(
+                    sealedActivity = activity,
+                    title = "Channel Options",
+                    selectedFilter = state.filter,
+                    leadingActions = buildList {
+                        if (loaded != null) add(FocusedOptionsAction.SEARCH)
+                        add(FocusedOptionsAction.REFRESH)
+                    },
+                )
+            },
+            resultCallback = { result ->
+                when (result) {
+                    is FocusedOptionsResult.SelectFilter -> viewModel.selectFilter(result.filter)
+                    is FocusedOptionsResult.RunAction -> when (result.action) {
+                        FocusedOptionsAction.SEARCH -> loaded?.let { mode ->
+                            navigateTo(
+                                screenFactory = { activity ->
+                                    FocusedChannelSearchScreen(
+                                        activity,
+                                        services,
+                                        settings,
+                                        mode.channel,
+                                        state.filter,
+                                    )
+                                },
+                            )
+                        }
+                        FocusedOptionsAction.REFRESH -> viewModel.load()
+                        FocusedOptionsAction.SETTINGS -> Unit
+                    }
+                }
+            },
+        )
+    }
 }
 
 @Composable
 private fun FocusedChannelContent(
     mode: FocusedChannelMode.Loaded,
     selectedFilter: FocusedLibraryFilter,
-    onFilter: (FocusedLibraryFilter) -> Unit,
     onMore: () -> Unit,
     onVideo: (FocusedVideoEntry) -> Unit,
 ) {
@@ -328,15 +411,6 @@ private fun FocusedChannelContent(
             variant = LightTextVariant.Subheading,
             modifier = Modifier.padding(horizontal = 1f.gridUnitsAsDp()),
         )
-        LightText(
-            text = if (mode.channel.allowsWholeChannel) "NEWEST UPLOADS ENABLED" else "SELECTED VIDEOS ONLY",
-            variant = LightTextVariant.Fine,
-            lighten = true,
-            modifier = Modifier
-                .padding(horizontal = 1f.gridUnitsAsDp())
-                .padding(top = 0.25f.gridUnitsAsDp()),
-        )
-        FocusedFilterRow(selectedFilter = selectedFilter, onFilter = onFilter)
         LightScrollView(
             modifier = Modifier
                 .weight(1f)
@@ -354,17 +428,29 @@ private fun FocusedChannelContent(
                     VideoRow(video.rowSummary()) { onVideo(video) }
                 }
             }
+            if (mode.continuation != null) {
+                ChannelMoreRow(loading = mode.loadingMore, onMore = onMore)
+            }
         }
-        if (mode.continuation != null) {
-            LightBottomBar(
-                items = listOf(
-                    LightBarButton.Text(
-                        text = "MORE",
-                        onClick = onMore.takeUnless { mode.loadingMore },
-                    ),
-                ),
-            )
-        }
+    }
+}
+
+@Composable
+internal fun ChannelMoreRow(
+    loading: Boolean,
+    onMore: () -> Unit,
+) {
+    if (loading) {
+        LightText(
+            text = "LOADING…",
+            variant = LightTextVariant.Subheading,
+            lighten = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 0.8f.gridUnitsAsDp()),
+        )
+    } else {
+        ActionRow("SEE MORE", onMore)
     }
 }
 

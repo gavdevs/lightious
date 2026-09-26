@@ -42,6 +42,19 @@ class CompanionStoreTest {
         assertEquals(emptyList(), profile.playlists)
         assertNull(profile.items.single().authorId)
         assertFalse(profile.items.single().isShort)
+        assertEquals(3, profile.channelFeedLimit)
+        assertTrue(profile.hideWatched)
+    }
+
+    @Test
+    fun `legacy cached explore profile loads as library`() {
+        val profile = Json.decodeFromString<CompanionProfile>(
+            """{"deviceId":"device-1","account":"gav","revision":1,"mode":"EXPLORE","items":[]}""",
+        )
+
+        assertEquals(ExperienceMode.LIBRARY, profile.mode)
+        assertEquals(3, profile.channelFeedLimit)
+        assertTrue(profile.hideWatched)
     }
 
     @Test
@@ -95,6 +108,8 @@ class CompanionStoreTest {
             account = "ga…@example.com",
             revision = 3,
             mode = ExperienceMode.FOCUSED,
+            channelFeedLimit = 5,
+            hideWatched = false,
             items = listOf(
                 CuratedVideo(
                     id = "item-1",

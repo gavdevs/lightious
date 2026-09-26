@@ -3,6 +3,7 @@ package com.loosewire.lightious.data
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.accept
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -162,6 +163,27 @@ class InvidiousApi internal constructor(
         decodeVideoList(response.body)
     }
 
+    suspend fun channelFeed(): Result<ChannelFeedPage> = runSuspendCatching {
+        require(deviceBearer != null) { "The channel feed requires a paired phone." }
+        val response = transport.get(
+            url = lightiousRoute("/channel-feed"),
+            headers = contentHeaders(),
+        )
+        response.requireSuccess("Channel feed")
+        val page = try {
+            json.decodeFromString<InvidiousChannelFeedDto>(response.body)
+        } catch (error: SerializationException) {
+            throw InvidiousApiException("The instance returned an invalid channel feed.", cause = error)
+        }
+        require(page.failedChannelIds.all(::validYouTubeChannelId)) {
+            "The instance returned an invalid channel feed."
+        }
+        ChannelFeedPage(
+            videos = page.videos.mapNotNull { item -> item.toVideoSummary() },
+            failedChannelIds = page.failedChannelIds.distinct(),
+        )
+    }
+
     suspend fun channelVideos(
         channelId: String,
         continuation: String? = null,
@@ -186,6 +208,44 @@ class InvidiousApi internal constructor(
             videos = page.videos.mapNotNull { item -> item.toVideoSummary() }
                 .distinctBy(VideoSummary::videoId),
             continuation = page.continuation?.takeIf(String::isNotBlank),
+        )
+    }
+
+    suspend fun channelSearch(
+        channelId: String,
+        query: String,
+        page: Int = 1,
+    ): Result<ChannelSearchPage> = runSuspendCatching {
+        require(deviceBearer != null) { "Channel search requires a paired phone." }
+        require(validYouTubeChannelId(channelId)) { "The companion returned an invalid channel ID." }
+        val trimmedQuery = query.trim()
+        require(trimmedQuery.isNotEmpty()) { "Enter a channel search query." }
+        require(trimmedQuery.toByteArray().size <= MAX_CHANNEL_SEARCH_QUERY_BYTES) {
+            "That channel search is too long."
+        }
+        require(page in 1..MAX_CHANNEL_SEARCH_PAGE) { "Invalid channel search page." }
+
+        val response = transport.get(
+            url = lightiousRoute("/channels/$channelId/search"),
+            parameters = mapOf(
+                "q" to trimmedQuery,
+                "page" to page.toString(),
+            ),
+            headers = contentHeaders(),
+        )
+        response.requireSuccess("Channel search")
+        val result = try {
+            json.decodeFromString<InvidiousChannelSearchDto>(response.body)
+        } catch (error: SerializationException) {
+            throw InvidiousApiException("The instance returned an invalid channel search.", cause = error)
+        }
+        ChannelSearchPage(
+            videos = result.videos.mapNotNull { item -> item.toVideoSummary() }
+                .filter { video -> video.authorId == channelId }
+                .distinctBy(VideoSummary::videoId),
+            nextPage = result.nextPage?.takeIf { nextPage ->
+                nextPage == page + 1 && nextPage <= MAX_CHANNEL_SEARCH_PAGE
+            },
         )
     }
 
@@ -410,6 +470,9 @@ class InvidiousApi internal constructor(
             thumbnailUrl = chooseThumbnail(videoThumbnails),
             authorId = authorId?.takeIf(::validYouTubeChannelId),
             isShort = false,
+            published = published.asLongOrNull()?.coerceAtLeast(0L) ?: 0L,
+            isUpcoming = isUpcoming.asBooleanOrNull() == true ||
+                (premiereTimestamp.asLongOrNull() ?: 0L) > 0L,
         )
     }
 
@@ -427,6 +490,9 @@ class InvidiousApi internal constructor(
             authorId = authorId?.takeIf(::validYouTubeChannelId),
             isShort = type.equals(SHORT_VIDEO_ITEM_TYPE, ignoreCase = true) ||
                 isShort.asBooleanOrNull() == true,
+            published = published.asLongOrNull()?.coerceAtLeast(0L) ?: 0L,
+            isUpcoming = isUpcoming.asBooleanOrNull() == true ||
+                (premiereTimestamp.asLongOrNull() ?: 0L) > 0L,
         )
 
         val progressive = formatStreams.orEmpty().mapNotNull { format ->
@@ -529,6 +595,8 @@ class InvidiousApi internal constructor(
     }
 
     private companion object {
+        const val MAX_CHANNEL_SEARCH_QUERY_BYTES = 256
+        const val MAX_CHANNEL_SEARCH_PAGE = 50
         const val MIN_THUMBNAIL_WIDTH = 300
         const val MAX_THUMBNAIL_WIDTH = 720
         val VIDEO_ITEM_TYPES = setOf("video")
@@ -615,6 +683,13 @@ private class KtorInvidiousHttpTransport : InvidiousHttpTransport {
     ): InvidiousHttpResponse {
         val response = client.get(url) {
             accept(ContentType.Application.Json)
+            if (url.endsWith("/api/lightious/v1/channel-feed")) {
+                // This request can collect the first release page from several saved channels.
+                timeout {
+                    requestTimeoutMillis = 90_000L
+                    socketTimeoutMillis = 90_000L
+                }
+            }
             parameters.forEach { (name, value) -> parameter(name, value) }
             headers.forEach { (name, value) -> header(name, value) }
         }

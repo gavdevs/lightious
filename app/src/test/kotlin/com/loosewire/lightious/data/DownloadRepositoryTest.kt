@@ -212,7 +212,26 @@ class DownloadRepositoryTest {
     }
 
     @Test
-    fun `sync removes a known Short download even in Explore mode`() = runTest {
+    fun `Library mode removes downloads without a curated grant`() = runTest {
+        val directory = Files.createTempDirectory("lightious-library-reconcile").toFile()
+        val repository = DownloadRepository(FakeDownloadsDao(), directory)
+        repository.queue(OWNER, summary(), DownloadKind.VIDEO)
+
+        repository.reconcile(
+            CompanionProfile(
+                deviceId = OWNER,
+                account = "account",
+                revision = 4,
+                mode = ExperienceMode.LIBRARY,
+                items = emptyList(),
+            ),
+        )
+
+        assertNull(repository.get(OWNER, VIDEO_ID))
+    }
+
+    @Test
+    fun `sync removes a known Short download in Library mode`() = runTest {
         val directory = Files.createTempDirectory("lightious-downloads-short-reconcile").toFile()
         val repository = DownloadRepository(FakeDownloadsDao(), directory)
         repository.queue(OWNER, summary(), DownloadKind.VIDEO)
@@ -227,7 +246,7 @@ class DownloadRepositoryTest {
                 deviceId = OWNER,
                 account = "account",
                 revision = 3,
-                mode = ExperienceMode.EXPLORE,
+                mode = ExperienceMode.LIBRARY,
                 items = emptyList(),
                 blockedVideoIds = setOf(VIDEO_ID),
             ),

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -73,6 +74,9 @@ data class VideoUiState(
     val errorMessage: String? = null,
     val checkingAction: Boolean = false,
     val download: DownloadedMedia? = null,
+    val finished: Boolean = false,
+    val watched: Boolean = false,
+    val savingWatched: Boolean = false,
 )
 
 class VideoViewModel(
@@ -92,14 +96,27 @@ class VideoViewModel(
     val uiState: StateFlow<VideoUiState> = _uiState.asStateFlow()
     private val _audioStarted = MutableStateFlow(false)
     val audioStarted: StateFlow<Boolean> = _audioStarted.asStateFlow()
+    private val _audioPlayRequested = MutableStateFlow(false)
+    val audioPlayRequested: StateFlow<Boolean> = _audioPlayRequested.asStateFlow()
     val audioPlaying = player.isPlaying
     val audioPositionMs = player.positionMs
     val audioDurationMs = player.durationMs
     val audioError = player.error
     private val playbackActionGate = PlaybackActionGate()
     private var playbackRecorded = false
+    private var resumePositionMs = 0L
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val watched = services.history.isWatched(initialVideo.videoId)
+                _uiState.update { it.copy(watched = it.watched || watched) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // A completion lookup must not prevent playback; marking reports write failures.
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val ownerDeviceId = services.companion.load(settings.instanceUrl).session?.deviceId
                 ?: return@launch
@@ -135,9 +152,12 @@ class VideoViewModel(
         }
     }
 
-    fun playAudio() {
-        if (_uiState.value.mode !is VideoMode.Loaded || _audioStarted.value) return
+    fun playAudio() = startAudio(resumePositionMs, playWhenReady = true)
+
+    private fun startAudio(positionMs: Long, playWhenReady: Boolean) {
+        if (_uiState.value.mode !is VideoMode.Loaded) return
         if (!beginPlaybackAction()) return
+        resumePositionMs = positionMs
 
         viewModelScope.launch {
             try {
@@ -155,19 +175,27 @@ class VideoViewModel(
                             _uiState.update { it.copy(errorMessage = "Audio player is unavailable.") }
                             return@launch
                         }
-                        queueAudio(details, resumePositionMs = 0L)
+                        _audioStarted.value = false
+                        _audioPlayRequested.value = false
+                        queueAudio(details, resumePositionMs = if (details.summary.liveNow) 0L else positionMs)
                         _audioStarted.value = true
-                        player.play()
+                        _uiState.update { it.copy(finished = false) }
+                        _audioPlayRequested.value = playWhenReady
+                        if (playWhenReady) player.play()
                         recordPlayback(details.summary)
                     }
                 }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                _uiState.update { it.copy(errorMessage = error.userMessage("Could not start audio.")) }
             } finally {
                 finishPlaybackAction()
             }
         }
     }
 
-    fun watch(onAuthorized: (VideoDetails, VideoPlaybackSource) -> Unit) {
+    internal fun watch(onAuthorized: (VideoDetails, VideoPlaybackSource, PlaybackStart) -> Unit) {
         if (_uiState.value.mode !is VideoMode.Loaded) return
         if (!beginPlaybackAction()) return
 
@@ -184,9 +212,19 @@ class VideoViewModel(
                                 errorMessage = null,
                             )
                         }
+                        val start = videoStartFromAudio(
+                            audioStarted = _audioStarted.value,
+                            audioPositionMs = player.positionMs.value,
+                            audioPlaying = _audioPlayRequested.value,
+                            savedPositionMs = resumePositionMs,
+                        )
+                        resumePositionMs = start.positionMs
+                        _audioStarted.value = false
+                        _audioPlayRequested.value = false
                         player.pause()
+                        player.setMediaQueue(emptyList())
                         recordPlayback(details.summary)
-                        onAuthorized(details, source)
+                        onAuthorized(details, source, start)
                     }
                 }
             } finally {
@@ -196,34 +234,60 @@ class VideoViewModel(
     }
 
     fun toggleAudio() {
-        if (audioPlaying.value) {
+        if (_audioPlayRequested.value) {
+            _audioPlayRequested.value = false
             player.pause()
             return
         }
-        if (!_audioStarted.value || !beginPlaybackAction()) return
-        viewModelScope.launch {
+        if (!_audioStarted.value) return
+        resumePositionMs = player.positionMs.value
+        startAudio(resumePositionMs, playWhenReady = true)
+    }
+
+    fun onVideoResult(result: VideoPlaybackResult) {
+        when (result) {
+            is VideoPlaybackResult.Stopped -> resumePositionMs = result.positionMs
+            is VideoPlaybackResult.Listen -> {
+                resumePositionMs = result.positionMs
+                startAudio(result.positionMs, result.playWhenReady)
+            }
+            VideoPlaybackResult.Finished -> playbackFinished()
+        }
+    }
+
+    fun saveVideoPosition(positionMs: Long) {
+        resumePositionMs = positionMs.coerceAtLeast(0L)
+    }
+
+    fun playbackFinished() {
+        _audioPlayRequested.value = false
+        player.pause()
+        _uiState.update { it.copy(finished = true) }
+    }
+
+    fun markWatched() {
+        if (_uiState.value.watched || _uiState.value.savingWatched) return
+        val video = (_uiState.value.mode as? VideoMode.Loaded)?.details?.summary ?: return
+        _uiState.update { it.copy(savingWatched = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            var markedLocally = false
             try {
-                when (val resolution = freshPlayback(FreshPlaybackAction.AUDIO)) {
-                    is FreshPlaybackResolution.Denied -> applyDeniedResolution(resolution)
-                    is FreshPlaybackResolution.Allowed -> {
-                        val details = resolution.details
-                        val resumePositionMs = player.positionMs.value
-                        _uiState.update {
-                            it.copy(
-                                mode = VideoMode.Loaded(details, resolution.policy),
-                                errorMessage = null,
-                            )
-                        }
-                        if (!player.awaitReady()) {
-                            _uiState.update { it.copy(errorMessage = "Audio player is unavailable.") }
-                            return@launch
-                        }
-                        queueAudio(details, resumePositionMs = resumePositionMs)
-                        player.play()
-                    }
+                services.history.markWatched(video)
+                markedLocally = true
+                // Completion is durable locally before optional network sync starts.
+                val currentSettings = services.settings.load()
+                val account = services.accounts.load(currentSettings.instanceUrl)
+                services.historySyncer.queueWatched(video, currentSettings, account)
+                _uiState.update { it.copy(watched = true, savingWatched = false) }
+                services.historySyncer.syncWatched(video, currentSettings, account)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (!markedLocally) {
+                    _uiState.update { it.copy(errorMessage = error.userMessage("Could not mark watched. Please try again.")) }
                 }
             } finally {
-                finishPlaybackAction()
+                _uiState.update { it.copy(watched = it.watched || markedLocally, savingWatched = false) }
             }
         }
     }
@@ -289,26 +353,23 @@ class VideoViewModel(
         super.onCleared()
     }
 
-    private fun queueAudio(details: VideoDetails, resumePositionMs: Long) {
+    private suspend fun queueAudio(details: VideoDetails, resumePositionMs: Long) {
         val audioUrl = checkNotNull(details.audioUrl)
-        player.setMediaQueue(
-            listOf(
-                LightAudioItem(
-                    source = LightAudioSource.UrlSource(audioUrl),
-                    metadata = LightMediaMetadata(
-                        title = details.summary.title,
-                        artist = details.summary.author,
-                        album = "Lightious",
-                        durationMs = details.summary.lengthSeconds
-                            .takeIf { it > 0L }
-                            ?.times(1_000L),
-                    ),
+        prepareAudioAt(
+            player = player,
+            item = LightAudioItem(
+                source = LightAudioSource.UrlSource(audioUrl),
+                metadata = LightMediaMetadata(
+                    title = details.summary.title,
+                    artist = details.summary.author,
+                    album = "Lightious",
+                    durationMs = details.summary.lengthSeconds
+                        .takeIf { it > 0L }
+                        ?.times(1_000L),
                 ),
             ),
+            positionMs = resumePositionMs,
         )
-        if (resumePositionMs > 0L) {
-            player.seekTo(resumePositionMs)
-        }
     }
 
     private fun recordPlayback(video: VideoSummary) {
@@ -377,6 +438,7 @@ class VideoViewModel(
             player.pause()
             player.setMediaQueue(emptyList())
             _audioStarted.value = false
+            _audioPlayRequested.value = false
         }
         if (details == null && !resolution.invalidateAudio) {
             _uiState.update { it.copy(errorMessage = resolution.message) }
@@ -427,9 +489,28 @@ class VideoScreen(
         val state by viewModel.uiState.collectAsState()
         val audioStarted by viewModel.audioStarted.collectAsState()
         val audioPlaying by viewModel.audioPlaying.collectAsState()
+        val audioPlayRequested by viewModel.audioPlayRequested.collectAsState()
         val audioPosition by viewModel.audioPositionMs.collectAsState()
         val audioDuration by viewModel.audioDurationMs.collectAsState()
         val audioError by viewModel.audioError.collectAsState()
+        val loadedMode = state.mode as? VideoMode.Loaded
+        val presentingAudio = loadedMode?.let { mode ->
+            shouldPresentAudioPlayer(mode.playbackPolicy, audioStarted)
+        } == true
+
+        LaunchedEffect(audioStarted, audioPlaying, audioPosition, audioDuration, audioError, state.checkingAction) {
+            if (audioPlaybackFinished(
+                    started = audioStarted,
+                    playing = audioPlaying,
+                    positionMs = audioPosition,
+                    durationMs = audioDuration,
+                    failed = audioError != null,
+                    changingPlayback = state.checkingAction,
+                )
+            ) {
+                viewModel.playbackFinished()
+            }
+        }
 
         LightTheme(colors = colors) {
             Box(
@@ -444,8 +525,8 @@ class VideoScreen(
                             onClick = { goBack() },
                             contentDescription = "Back",
                         ),
-                        center = LightTopBarCenter.Text("Video"),
-                        rightButton = (state.mode as? VideoMode.Loaded)?.let { mode ->
+                        center = LightTopBarCenter.Text(if (state.finished) "Finished" else if (presentingAudio) "Listen" else "Video"),
+                        rightButton = loadedMode?.takeUnless { state.finished }?.let { mode ->
                             videoDownloadButton(
                                 download = state.download,
                                 desiredKind = mode.playbackPolicy.downloadKind,
@@ -464,39 +545,82 @@ class VideoScreen(
                             modifier = Modifier.weight(1f),
                         )
                         is VideoMode.Loaded -> {
-                            VideoDetailsContent(
-                                details = mode.details,
-                                playbackPolicy = mode.playbackPolicy,
-                                audioPlaying = audioPlaying,
-                                audioPositionMs = audioPosition,
-                                audioDurationMs = audioDuration,
-                                audioError = audioError?.let { "${it.kind}: ${it.diagnostic}" },
-                                download = state.download,
-                                modifier = Modifier.weight(1f),
-                            )
-                            VideoActions(
-                                details = mode.details,
-                                playbackPolicy = mode.playbackPolicy,
-                                audioStarted = audioStarted,
-                                audioPlaying = audioPlaying,
-                                checkingAction = state.checkingAction,
-                                onWatch = {
-                                    viewModel.watch { _, source ->
-                                        navigateTo(
-                                            screenFactory = { activity ->
-                                                VideoPlaybackScreen(
-                                                    sealedActivity = activity,
-                                                    playbackSource = source,
-                                                )
-                                            },
-                                        )
-                                    }
-                                },
-                                onListen = viewModel::playAudio,
-                                onToggleAudio = viewModel::toggleAudio,
-                                onSkipBack = viewModel::skipAudioBack,
-                                onSkipForward = viewModel::skipAudioForward,
-                            )
+                            if (state.finished) {
+                                PlaybackFinishedContent(
+                                    title = mode.details.summary.title,
+                                    watched = state.watched,
+                                    saving = state.savingWatched,
+                                    onMarkWatched = viewModel::markWatched,
+                                    onClose = { goBack() },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            } else {
+                                if (state.checkingAction && !presentingAudio) {
+                                    VideoLoadingContent(Modifier.weight(1f), "Preparing playback…")
+                                } else if (presentingAudio) {
+                                    AudioPlaybackContent(
+                                        title = mode.details.summary.title,
+                                        author = mode.details.summary.author,
+                                        detailLines = buildList {
+                                            if (state.checkingAction) add("Loading playback…")
+                                            videoMetadataLine(mode.details.summary)
+                                                .takeIf(String::isNotBlank)
+                                                ?.let(::add)
+                                            add(
+                                                if (mode.playbackPolicy == PlaybackPolicy.LISTEN_ONLY) {
+                                                    "LISTEN ONLY"
+                                                } else {
+                                                    "AUDIO"
+                                                },
+                                            )
+                                            state.download?.let { add(downloadStatusLabel(it)) }
+                                        },
+                                        positionMs = audioPosition,
+                                        durationMs = resolvedAudioDurationMs(
+                                            playerDurationMs = audioDuration,
+                                            metadataDurationSeconds = mode.details.summary.lengthSeconds,
+                                        ),
+                                        errorMessage = audioError?.let { "Audio failed: ${it.kind}: ${it.diagnostic}" },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                } else {
+                                    VideoDetailsContent(
+                                        details = mode.details,
+                                        playbackPolicy = mode.playbackPolicy,
+                                        download = state.download,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                                VideoActions(
+                                    details = mode.details,
+                                    playbackPolicy = mode.playbackPolicy,
+                                    audioStarted = audioStarted,
+                                    audioPlaying = audioPlayRequested,
+                                    presentingAudio = presentingAudio,
+                                    checkingAction = state.checkingAction,
+                                    onWatch = {
+                                        viewModel.watch { details, source, start ->
+                                            navigateTo(
+                                                screenFactory = { activity ->
+                                                    VideoPlaybackScreen(
+                                                        sealedActivity = activity,
+                                                        playbackSource = source,
+                                                        initialPositionMs = start.positionMs,
+                                                        playWhenReady = start.playWhenReady,
+                                                        canListen = details.audioUrl != null,
+                                                        onPositionSaved = viewModel::saveVideoPosition,
+                                                    )
+                                                },
+                                                resultCallback = viewModel::onVideoResult,
+                                            )
+                                        }
+                                    },
+                                    onListen = viewModel::playAudio,
+                                    onToggleAudio = viewModel::toggleAudio,
+                                    onSkipBack = viewModel::skipAudioBack,
+                                    onSkipForward = viewModel::skipAudioForward,
+                                )
+                            }
                         }
                     }
                 }
@@ -577,9 +701,9 @@ private val PlaybackPolicy.downloadKind: DownloadKind
     }
 
 @Composable
-private fun VideoLoadingContent(modifier: Modifier = Modifier) {
+private fun VideoLoadingContent(modifier: Modifier = Modifier, message: String = "Loading video…") {
     LightText(
-        text = "Loading video…",
+        text = message,
         variant = LightTextVariant.Copy,
         modifier = modifier
             .fillMaxWidth()
@@ -618,10 +742,6 @@ private fun VideoFailureContent(
 private fun VideoDetailsContent(
     details: VideoDetails,
     playbackPolicy: PlaybackPolicy,
-    audioPlaying: Boolean,
-    audioPositionMs: Long,
-    audioDurationMs: Long,
-    audioError: String?,
     download: DownloadedMedia?,
     modifier: Modifier = Modifier,
 ) {
@@ -674,21 +794,6 @@ private fun VideoDetailsContent(
                 )
             }
         }
-        if (audioPlaying || audioPositionMs > 0L) {
-            LightText(
-                text = "LISTENING  ${playbackTimeLabel(audioPositionMs, audioDurationMs)}",
-                variant = LightTextVariant.Fine,
-                monospace = true,
-                modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
-            )
-        }
-        audioError?.let { message ->
-            LightText(
-                text = "Audio failed: $message",
-                variant = LightTextVariant.Detail,
-                modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
-            )
-        }
         if (details.description.isNotBlank()) {
             LightText(
                 text = details.description,
@@ -707,6 +812,7 @@ private fun VideoActions(
     playbackPolicy: PlaybackPolicy,
     audioStarted: Boolean,
     audioPlaying: Boolean,
+    presentingAudio: Boolean,
     checkingAction: Boolean,
     onWatch: () -> Unit,
     onListen: () -> Unit,
@@ -719,40 +825,24 @@ private fun VideoActions(
     } else {
         null
     }
-    if (audioStarted) {
+    if (presentingAudio) {
+        val watchButton = watchSource?.let {
+            LightBarButton.LightIcon(
+                icon = LightIcons.MEDIA,
+                onClick = onWatch.takeUnless { checkingAction },
+                contentDescription = "Watch video",
+            )
+        }
         LightBottomBar(
-            items = buildList {
-                add(
-                    LightBarButton.LightIcon(
-                        icon = LightIcons.SKIP_BACKWARD_FIFTEEN,
-                        onClick = onSkipBack,
-                        contentDescription = "Back 15 seconds",
-                    ),
-                )
-                add(
-                    LightBarButton.LightIcon(
-                        icon = if (audioPlaying) LightIcons.PAUSE else LightIcons.PLAY,
-                        onClick = onToggleAudio.takeUnless { checkingAction && !audioPlaying },
-                        contentDescription = if (audioPlaying) "Pause" else "Play",
-                    ),
-                )
-                add(
-                    LightBarButton.LightIcon(
-                        icon = LightIcons.SKIP_FORWARD_FIFTEEN,
-                        onClick = onSkipForward,
-                        contentDescription = "Forward 15 seconds",
-                    ),
-                )
-                if (watchSource != null) {
-                    add(
-                        LightBarButton.LightIcon(
-                            icon = LightIcons.MEDIA,
-                            onClick = onWatch.takeUnless { checkingAction },
-                            contentDescription = "Watch video",
-                        ),
-                    )
-                }
-            },
+            items = playbackTransportItems(
+                playing = audioPlaying,
+                canSeek = audioStarted,
+                playPauseEnabled = details.audioUrl != null && (!checkingAction || audioPlaying),
+                onSeekBack = onSkipBack,
+                onTogglePlayback = if (audioStarted) onToggleAudio else onListen,
+                onSeekForward = onSkipForward,
+                trailingItem = watchButton,
+            ),
         )
     } else {
         LightBottomBar(

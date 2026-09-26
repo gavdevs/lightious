@@ -16,6 +16,7 @@ import com.loosewire.lightious.LightiousServices
 import com.loosewire.lightious.data.ClientSettings
 import com.loosewire.lightious.data.CompanionProfile
 import com.loosewire.lightious.data.DownloadedMedia
+import com.loosewire.lightious.data.ExperienceMode
 import com.loosewire.lightious.data.FocusedLibrarySearchResults
 import com.loosewire.lightious.data.searchFocusedLibrary
 import com.thelightphone.sdk.LightScreen
@@ -133,7 +134,7 @@ class FocusedLibrarySearchScreen(
                             )
                         },
                         onChannel = { channel ->
-                            navigateTo(
+                            if (profile?.mode == ExperienceMode.LIBRARY) navigateTo(
                                 screenFactory = { activity ->
                                     FocusedChannelScreen(activity, services, settings, channel)
                                 },

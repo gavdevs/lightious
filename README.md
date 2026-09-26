@@ -4,27 +4,40 @@ Lightious is a small, text-first Invidious client for Light Phone III. It is a
 clean-room Kotlin application built on the Light SDK—not a Clipious or
 Materialious fork or wrapper.
 
-The launch screen is a pairing-first Focused library and never loads a
-recommendation feed on its own. Popular videos are available only when a paired
-companion explicitly selects Explore mode and that page is enabled.
+The launch screen is a pairing-first Focused channel feed. It shows a finite
+window of recent uploads from channels you chose in the companion, with no
+recommendations or endless archive. Library mode also permits browsing and
+searching those approved channels. Both modes keep the same curated permissions.
 
 ## Features
 
-- Search for videos or open a YouTube URL.
-- Open an optional signed-in Invidious account feed.
 - Watch a low-bandwidth progressive stream while preserving its native aspect ratio.
-- Listen through the Light SDK audio player, including detached playback.
-- Keep optional local search and watch histories.
-- Choose which pages appear on Home.
+- Listen through a full Light SDK player view with title and channel metadata,
+  progress, seek, and detached playback controls.
+- Switch between Watch and Listen without losing your position or in-app
+  play/pause choice, including video downloads.
+- End playback on a quiet screen with explicit Mark Watched and Close actions.
+- Show loading/connecting while a companion request is pending, with retry
+  controls only after the request fails.
+- Keep optional local watch history, separate from explicit watched status.
 - Select an app-wide preferred audio language.
 - Choose whether media is proxied through the configured Invidious instance.
 - Pair with the companion website using a 12-character code—no token entry on the phone.
-- Switch between unrestricted Explore and an explicitly curated Focused library.
-- Browse Focused videos, allowed channels, and private Lightious playlists from
-  LightOS-style bottom navigation.
-- Search videos, audio, channels, playlist names and contents, and downloaded
-  titles from one library search.
-- Filter each Focused view by all, audio-only, or video-enabled items.
+- Choose Focused or Library mode in the browser companion; unrestricted Explore
+  has been removed.
+- In Focused mode, combine the newest three eligible uploads per saved channel
+  into one list, ordered by release date. The companion can adjust this to one
+  through five and turn hiding watched videos on or off.
+- Hide manually watched videos only after selecting each channel's recent
+  window, so watching a video never fills its place with an older upload.
+- Keep deliberately saved videos, private playlists, and downloads available
+  from LightOS-style bottom navigation.
+- In Library mode, browse and search the complete catalog of an allowed channel
+  with paired-device authorization and paged results.
+- Search saved videos, playlist names and contents, and downloaded titles from
+  one library search; Library mode also includes saved channels.
+- Filter each Focused view by all, audio-only, or video-enabled items from one
+  compact top-bar options control.
 - Allow each selected video or whole channel to be listened to only or watched
   and listened to.
 - Download approved media to app-private storage, with progress, cancel, retry,
@@ -36,6 +49,27 @@ companion explicitly selects Explore mode and that page is enabled.
 
 There is no autoplay, comments, algorithmic Home feed, notifications, or
 automatic public-instance rotation.
+
+## Channel feed behavior
+
+Focused uses the newest available upload/replay window, not an unread archive.
+For six saved channels and a limit of three, it can show up to eighteen videos;
+marking one watched reduces that list until newer uploads arrive. Shorts,
+current livestreams, and upcoming premieres are excluded. Partial channel
+failures are shown with a retry action instead of being reported as an empty
+feed. No feed pagination, daily schedule, time limit, or completion counts are
+added.
+
+Watched status is stored on this phone and changes only when you select **Mark
+Watched**. It works with watch history and optional account-history sync turned
+off. Starting playback or closing a video does not mark it watched. Saved videos
+and playlists remain available even when their videos disappear from the channel
+feed. Completion is not synchronized between phones.
+
+The companion/server changes must be deployed together with the new client.
+An older server will show a feed error until it provides
+`GET /api/lightious/v1/channel-feed`; the client does not fall back to unrestricted
+channel browsing. Existing Explore profiles migrate to curated Library mode.
 
 ## Project structure
 
@@ -162,6 +196,13 @@ companion device credential and never grants access to `/lightious` controls.
 Search and watch history are stored only in the app's local Room database.
 Recording can be disabled independently, and each history screen provides a
 separate confirmed clear action.
+
+Recent playback history records that an item was opened for playback. Completion
+is separate: only the explicit **Mark Watched** action records a watched flag.
+These flags are stored in a separate local database, preserving the legacy
+history database and surviving recent-history clearing/pruning. Optional account
+history sync sends explicitly marked items and retries queued completions after
+offline use; merely starting a video no longer marks it watched on the server.
 
 ## Instance requirements
 

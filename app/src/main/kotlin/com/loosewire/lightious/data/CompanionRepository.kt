@@ -112,14 +112,10 @@ class CompanionRepository internal constructor(
         if (videoId in profile.knownShortVideoIds()) {
             return PlaybackAccess(allowed = false, message = SHORTS_BLOCKED_MESSAGE)
         }
-        if (profile.mode == ExperienceMode.EXPLORE) {
-            return PlaybackAccess(allowed = true, policy = PlaybackPolicy.WATCH_AND_LISTEN)
-        }
-
         val policy = profile.playbackPolicyFor(videoId, authorId)
             ?: return PlaybackAccess(
                 allowed = false,
-                message = "This video is not in your Focused library.",
+                message = "This video is not in your library.",
             )
         return PlaybackAccess(allowed = true, policy = policy)
     }

@@ -39,6 +39,24 @@ class FocusedLibraryTest {
     }
 
     @Test
+    fun `channel search keeps only matching channel results and applies exact policy overrides`() {
+        val channel = profile().focusedChannels().first()
+
+        val entries = channel.searchResultsWithPolicy(
+            listOf(
+                summary(VIDEO_A, CHANNEL_A),
+                summary(VIDEO_D, CHANNEL_A),
+                summary(VIDEO_B, CHANNEL_B),
+                summary(VIDEO_C, CHANNEL_A, isShort = true),
+            ),
+        )
+
+        assertEquals(listOf(VIDEO_A, VIDEO_D), entries.map { entry -> entry.video.videoId })
+        assertEquals(PlaybackPolicy.LISTEN_ONLY, entries.first().playbackPolicy)
+        assertEquals(PlaybackPolicy.WATCH_AND_LISTEN, entries.last().playbackPolicy)
+    }
+
+    @Test
     fun `playlist-only videos stay out of main videos and remain available in their playlist`() {
         val profile = profile()
 
@@ -67,7 +85,7 @@ class FocusedLibraryTest {
 
     @Test
     fun `library search finds videos channels and playlists without changing main visibility`() {
-        val profile = profile()
+        val profile = profile().copy(mode = ExperienceMode.LIBRARY)
 
         val contentMatch = profile.searchFocusedLibrary("sleep audio")
 
@@ -85,6 +103,15 @@ class FocusedLibraryTest {
         assertEquals(listOf(VIDEO_B), standaloneVideo.videos.map(CuratedVideo::videoId))
         assertTrue(standaloneVideo.channels.isEmpty())
         assertTrue(profile.searchFocusedLibrary("   ").isEmpty)
+    }
+
+    @Test
+    fun `focused search retains saved content without opening channel archives`() {
+        val results = profile().searchFocusedLibrary("explicit channel")
+
+        assertEquals(listOf(VIDEO_A), results.videos.map(CuratedVideo::videoId))
+        assertTrue(results.channels.isEmpty())
+        assertEquals(listOf("playlist"), results.playlists.map(FocusedPlaylistEntry::id))
     }
 
     @Test

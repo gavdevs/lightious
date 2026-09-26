@@ -287,8 +287,6 @@ class DownloadRepository internal constructor(
             .forEach { download ->
                 val policy = if (download.videoId in blockedShorts) {
                     null
-                } else if (profile.mode == ExperienceMode.EXPLORE) {
-                    PlaybackPolicy.WATCH_AND_LISTEN
                 } else {
                     profile.playbackPolicyFor(download.videoId, download.authorId)
                 }

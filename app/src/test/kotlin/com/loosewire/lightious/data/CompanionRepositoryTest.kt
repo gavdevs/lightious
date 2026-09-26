@@ -83,22 +83,25 @@ class CompanionRepositoryTest {
     }
 
     @Test
-    fun `paired explore profile explicitly allows unrestricted playback`() = runTest {
+    fun `paired library profile requires curated playback authorization`() = runTest {
         val store = CompanionStore(
-            createDataStore(File.createTempFile("lightious-explore-policy", ".preferences_pb")),
+            createDataStore(File.createTempFile("lightious-library-policy", ".preferences_pb")),
             FakeCipher(),
         )
         store.saveSession(
             CompanionSession("https://invidious.example", DEVICE_ID, "gav", DEVICE_BEARER),
         )
-        val transport = ProfileSyncTransport(ExperienceMode.EXPLORE)
+        val transport = ProfileSyncTransport(ExperienceMode.LIBRARY)
         val repository = CompanionRepository(store) { url -> CompanionApi(url, transport) }
 
+        val allowed = repository.authorizePlayback("https://invidious.example", "dQw4w9WgXcQ", null)
         val access = repository.authorizePlayback("https://invidious.example", "aqz-KE-bpKQ", null)
 
-        assertTrue(access.allowed)
-        assertEquals(PlaybackPolicy.WATCH_AND_LISTEN, access.policy)
-        assertEquals(1, transport.syncCalls)
+        assertTrue(allowed.allowed)
+        assertEquals(PlaybackPolicy.LISTEN_ONLY, allowed.policy)
+        assertFalse(access.allowed)
+        assertEquals(null, access.policy)
+        assertEquals(2, transport.syncCalls)
     }
 
     @Test
@@ -182,7 +185,7 @@ class CompanionRepositoryTest {
         assertTrue(playlistOnly.allowed)
         assertEquals(PlaybackPolicy.WATCH_AND_LISTEN, playlistOnly.policy)
         assertFalse(denied.allowed)
-        assertEquals("This video is not in your Focused library.", denied.message)
+        assertEquals("This video is not in your library.", denied.message)
         assertEquals(3, transport.syncCalls)
     }
 

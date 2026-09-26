@@ -14,7 +14,6 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewModelScope
 import com.loosewire.lightious.LightiousServices
 import com.loosewire.lightious.data.ClientSettings
-import com.loosewire.lightious.data.SearchHistoryEntry
 import com.loosewire.lightious.data.VideoSummary
 import com.loosewire.lightious.data.WatchHistoryEntry
 import com.thelightphone.sdk.LightScreen
@@ -33,7 +32,6 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.LightTopBarCenter
 import com.thelightphone.sdk.ui.gridUnitsAsDp
-import com.thelightphone.sdk.ui.lightClickable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -42,123 +40,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-
-data class SearchHistoryUiState(
-    val settings: ClientSettings = ClientSettings(),
-    val entries: List<SearchHistoryEntry> = emptyList(),
-    val loading: Boolean = true,
-    val errorMessage: String? = null,
-)
-
-class SearchHistoryViewModel(
-    private val services: LightiousServices,
-) : LightViewModel<Unit>() {
-    private val _uiState = MutableStateFlow(SearchHistoryUiState())
-    val uiState: StateFlow<SearchHistoryUiState> = _uiState.asStateFlow()
-    private var requestJob: Job? = null
-
-    init {
-        load()
-    }
-
-    fun load() {
-        requestJob?.cancel()
-        requestJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                _uiState.value = SearchHistoryUiState(
-                    settings = services.settings.load(),
-                    entries = services.history.searchHistory(),
-                    loading = false,
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                _uiState.update {
-                    it.copy(loading = false, errorMessage = error.userMessage("Could not load history."))
-                }
-            }
-        }
-    }
-
-    fun clear() {
-        requestJob?.cancel()
-        requestJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                services.history.clearSearchHistory()
-                requestJob = null
-                load()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                _uiState.update { it.copy(errorMessage = error.userMessage("Could not clear history.")) }
-            }
-        }
-    }
-
-    fun dismissError() {
-        _uiState.update { it.copy(errorMessage = null) }
-    }
-}
-
-class SearchHistoryScreen(
-    sealedActivity: SealedLightActivity,
-    private val services: LightiousServices,
-) : LightScreen<Unit, SearchHistoryViewModel>(sealedActivity) {
-    override val viewModelClass = SearchHistoryViewModel::class.java
-
-    override fun createViewModel() = SearchHistoryViewModel(services)
-
-    override fun willShow() {
-        viewModel.load()
-    }
-
-    @Composable
-    override fun Content() {
-        val colors by LightThemeController.colors.collectAsState()
-        val state by viewModel.uiState.collectAsState()
-        LightTheme(colors = colors) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(LightThemeTokens.colors.background),
-            ) {
-                if (state.loading) {
-                    LoadingContent("Loading…", "Search History")
-                } else {
-                    SearchHistoryContent(
-                        state = state,
-                        onBack = { goBack() },
-                        onSearch = { query ->
-                            navigateTo(
-                                screenFactory = { activity ->
-                                    SearchScreen(activity, services, query, autoSubmit = true)
-                                },
-                            )
-                        },
-                        onClear = {
-                            navigateTo(
-                                screenFactory = { activity ->
-                                    ConfirmScreen(
-                                        activity,
-                                        title = "Clear Search History",
-                                        message = "Delete every locally saved search?",
-                                        confirmLabel = "CLEAR",
-                                    )
-                                },
-                                resultCallback = { confirmed ->
-                                    if (confirmed) viewModel.clear()
-                                },
-                            )
-                        },
-                    )
-                }
-                state.errorMessage?.let { message ->
-                    LightFullscreenModal(message = message, onClose = viewModel::dismissError)
-                }
-            }
-        }
-    }
-}
 
 data class WatchHistoryUiState(
     val settings: ClientSettings = ClientSettings(),
@@ -291,40 +172,6 @@ class WatchHistoryScreen(
                 state.errorMessage?.let { message ->
                     LightFullscreenModal(message = message, onClose = viewModel::dismissError)
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SearchHistoryContent(
-    state: SearchHistoryUiState,
-    onBack: () -> Unit,
-    onSearch: (String) -> Unit,
-    onClear: () -> Unit,
-) {
-    HistoryScaffold(
-        title = "Search History",
-        hasEntries = state.entries.isNotEmpty(),
-        onBack = onBack,
-        onClear = onClear,
-    ) {
-        if (!state.settings.saveSearchHistory) {
-            HistoryNotice("Saving new searches is off in Settings.")
-        }
-        if (state.entries.isEmpty()) {
-            HistoryNotice("No saved searches yet.")
-        } else {
-            state.entries.forEach { entry ->
-                LightText(
-                    text = entry.query,
-                    variant = LightTextVariant.Copy,
-                    maxLines = 2,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .lightClickable { onSearch(entry.query) }
-                        .padding(vertical = 0.7f.gridUnitsAsDp()),
-                )
             }
         }
     }

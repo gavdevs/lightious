@@ -69,6 +69,7 @@ class CompanionViewModel(
 
     fun load() {
         requestJob?.cancel()
+        _uiState.update { it.copy(loading = true, errorMessage = null) }
         requestJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val settings = services.settings.load()
@@ -425,15 +426,16 @@ private fun PairedContent(
             "EXPERIENCE",
             when (profile?.mode) {
                 ExperienceMode.FOCUSED -> "FOCUSED"
-                ExperienceMode.EXPLORE -> "EXPLORE"
+                ExperienceMode.LIBRARY -> "LIBRARY"
                 null -> "SYNC NEEDED"
             },
             onSync,
         )
-        SettingRow(
-            "FOCUSED LIBRARY",
-            profile?.let { "${it.items.size} VIDEO${if (it.items.size == 1) "" else "S"}" } ?: "UNKNOWN",
-            onSync,
+        LightText(
+            text = "Manage your library and channel feed on the companion website.",
+            variant = LightTextVariant.Detail,
+            lighten = true,
+            modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
         )
         ActionRow("SYNC NOW", onSync)
         ActionRow("FORGET THIS PHONE", onForget)

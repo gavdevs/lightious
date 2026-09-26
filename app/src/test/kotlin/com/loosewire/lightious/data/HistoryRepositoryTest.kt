@@ -3,6 +3,7 @@ package com.loosewire.lightious.data
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -15,7 +16,7 @@ class HistoryRepositoryTest {
     fun `search history deduplicates normalized queries and orders newest first`() = runTest {
         val dao = FakeHistoryDao()
         var clock = 100L
-        val repository = HistoryRepository(dao, now = { clock })
+        val repository = HistoryRepository(dao, dao, now = { clock })
 
         repository.recordSearch("  Kotlin   Coroutines  ")
         clock = 200L
@@ -33,7 +34,7 @@ class HistoryRepositoryTest {
     @Test
     fun `search history excludes direct YouTube video URLs`() = runTest {
         val dao = FakeHistoryDao()
-        val repository = HistoryRepository(dao, now = { 100L })
+        val repository = HistoryRepository(dao, dao, now = { 100L })
 
         repository.recordSearch("https://youtu.be/dQw4w9WgXcQ?t=12")
         repository.recordSearch("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
@@ -46,7 +47,7 @@ class HistoryRepositoryTest {
     fun `watch history upserts metadata and moves a rewatch to newest`() = runTest {
         val dao = FakeHistoryDao()
         var clock = 100L
-        val repository = HistoryRepository(dao, now = { clock })
+        val repository = HistoryRepository(dao, dao, now = { clock })
 
         repository.recordWatch(video(videoId = "first-video", title = "Original title"))
         clock = 200L
@@ -62,13 +63,121 @@ class HistoryRepositoryTest {
     }
 
     @Test
+    fun `starting playback never marks a video watched or queues completion sync`() = runTest {
+        val dao = FakeHistoryDao()
+        val repository = HistoryRepository(dao, dao, now = { 100L })
+        val account = AccountSession("https://invidious.example", "token", "account")
+
+        HistorySyncer(repository).recordPlayback(
+            video = video("started-video", "Started"),
+            settings = ClientSettings(
+                instanceUrl = account.instanceUrl,
+                saveWatchHistory = true,
+                syncAccountHistory = true,
+            ),
+            account = account,
+        )
+
+        assertEquals(listOf("started-video"), repository.watchHistory().map { it.video.videoId })
+        assertFalse(repository.isWatched("started-video"))
+        assertTrue(repository.watchedVideoIds().isEmpty())
+        assertTrue(repository.pendingServerWatches(account.accountKey).isEmpty())
+    }
+
+    @Test
+    fun `explicit watched state survives repository recreation and recent history clearing`() = runTest {
+        val dao = FakeHistoryDao()
+        val repository = HistoryRepository(dao, dao, now = { 100L })
+        val completedVideo = video("completed-video", "Finished")
+        repository.recordWatch(completedVideo)
+        repository.markWatched(completedVideo)
+        repository.markWatched(completedVideo)
+
+        repository.clearWatchHistory()
+        val reopenedRepository = HistoryRepository(dao, dao)
+
+        assertTrue(reopenedRepository.watchHistory().isEmpty())
+        assertTrue(reopenedRepository.isWatched(completedVideo.videoId))
+        assertEquals(setOf(completedVideo.videoId), reopenedRepository.watchedVideoIds())
+    }
+
+    @Test
+    fun `recent history pruning does not forget explicit completion`() = runTest {
+        val dao = FakeHistoryDao()
+        var clock = 0L
+        val repository = HistoryRepository(dao, dao, now = { clock++ })
+        val completedVideo = video("completed-video", "Finished")
+        repository.recordWatch(completedVideo)
+        repository.markWatched(completedVideo)
+
+        repeat(500) { index -> repository.recordWatch(video("other-$index", "Other")) }
+
+        assertFalse(repository.watchHistory().any { it.video.videoId == completedVideo.videoId })
+        assertTrue(repository.isWatched(completedVideo.videoId))
+    }
+
+    @Test
+    fun `explicit watched state does not require enabled history recording or server sync`() = runTest {
+        val dao = FakeHistoryDao()
+        val repository = HistoryRepository(dao, dao, now = { 100L })
+        val completedVideo = video("completed-video", "Finished")
+        val settings = ClientSettings(saveWatchHistory = false, syncAccountHistory = false)
+        val syncer = HistorySyncer(repository)
+        syncer.recordPlayback(completedVideo, settings, account = null)
+
+        repository.markWatched(completedVideo)
+        syncer.syncWatched(completedVideo, settings, account = null)
+
+        assertTrue(repository.watchHistory().isEmpty())
+        assertTrue(repository.isWatched(completedVideo.videoId))
+        assertTrue(repository.pendingServerWatches("account").isEmpty())
+    }
+
+    @Test
+    fun `sync cannot enqueue an unmarked video even when account history is enabled`() = runTest {
+        val dao = FakeHistoryDao()
+        val repository = HistoryRepository(dao, dao, now = { 100L })
+        val account = AccountSession("https://invidious.example", "token", "account")
+
+        HistorySyncer(repository).syncWatched(
+            video("unmarked-video", "Unfinished"),
+            ClientSettings(instanceUrl = account.instanceUrl, syncAccountHistory = true),
+            account,
+        )
+
+        assertTrue(repository.pendingServerWatches(account.accountKey).isEmpty())
+    }
+
+    @Test
+    fun `completion can be durably queued without starting network sync`() = runTest {
+        val dao = FakeHistoryDao()
+        val repository = HistoryRepository(dao, dao, now = { 100L })
+        val account = AccountSession("https://invidious.example", "token", "account")
+        val settings = ClientSettings(instanceUrl = account.instanceUrl, syncAccountHistory = true)
+        val completedVideo = video("dQw4w9WgXcQ", "Finished")
+        val syncer = HistorySyncer(repository)
+
+        assertFalse(syncer.queueWatched(completedVideo, settings, account))
+        repository.markWatched(completedVideo)
+        assertTrue(syncer.queueWatched(completedVideo, settings, account))
+        assertTrue(syncer.queueWatched(completedVideo, settings, account))
+
+        // Ending the screen before syncWatched runs must leave a deduplicated
+        // durable record for a later playback to retry.
+        val reopenedRepository = HistoryRepository(dao, dao)
+        assertTrue(reopenedRepository.isWatched(completedVideo.videoId))
+        assertEquals(listOf(completedVideo.videoId), reopenedRepository.pendingServerWatches(account.accountKey))
+    }
+
+    @Test
     fun `explicit Shorts are never recorded or queued for history sync`() = runTest {
         val dao = FakeHistoryDao()
-        val repository = HistoryRepository(dao, now = { 100L })
+        val repository = HistoryRepository(dao, dao, now = { 100L })
         val syncer = HistorySyncer(repository)
         val short = video("short-video", "A Short").copy(isShort = true)
 
         repository.recordWatch(short)
+        repository.markWatched(short)
         syncer.recordPlayback(
             video = short,
             settings = ClientSettings(saveWatchHistory = true, syncAccountHistory = true),
@@ -76,15 +185,17 @@ class HistoryRepositoryTest {
         )
 
         assertTrue(repository.watchHistory().isEmpty())
+        assertFalse(repository.isWatched(short.videoId))
         assertTrue(repository.pendingServerWatches("account").isEmpty())
     }
 
     @Test
     fun `sync purges known Shorts from cached watch history and pending outbox`() = runTest {
         val dao = FakeHistoryDao()
-        val repository = HistoryRepository(dao, now = { 100L })
+        val repository = HistoryRepository(dao, dao, now = { 100L })
         val video = video("dQw4w9WgXcQ", "Previously cached")
         repository.recordWatch(video)
+        repository.markWatched(video)
         repository.enqueueServerWatch("account", video.videoId)
 
         repository.reconcile(
@@ -92,20 +203,21 @@ class HistoryRepositoryTest {
                 deviceId = "0123456789abcdef0123456789abcdef",
                 account = "account",
                 revision = 2,
-                mode = ExperienceMode.EXPLORE,
+                mode = ExperienceMode.LIBRARY,
                 items = emptyList(),
                 blockedVideoIds = setOf(video.videoId),
             ),
         )
 
         assertTrue(repository.watchHistory().isEmpty())
+        assertFalse(repository.isWatched(video.videoId))
         assertTrue(repository.pendingServerWatches("account").isEmpty())
     }
 
     @Test
     fun `history syncer respects local and account history toggles`() = runTest {
         val dao = FakeHistoryDao()
-        val repository = HistoryRepository(dao, now = { 100L })
+        val repository = HistoryRepository(dao, dao, now = { 100L })
         val syncer = HistorySyncer(repository)
         val account = AccountSession(
             instanceUrl = "https://invidious.example",
@@ -142,7 +254,7 @@ class HistoryRepositoryTest {
     fun `outbox is account scoped deduplicated and completed in queue order`() = runTest {
         val dao = FakeHistoryDao()
         var clock = 100L
-        val repository = HistoryRepository(dao, now = { clock })
+        val repository = HistoryRepository(dao, dao, now = { clock })
 
         repository.enqueueServerWatch("account-a", "video-one")
         clock = 200L
@@ -176,7 +288,7 @@ class HistoryRepositoryTest {
     fun `outbox returns at most one sync batch`() = runTest {
         val dao = FakeHistoryDao()
         var clock = 0L
-        val repository = HistoryRepository(dao, now = { clock++ })
+        val repository = HistoryRepository(dao, dao, now = { clock++ })
 
         repeat(30) { index ->
             repository.enqueueServerWatch("account", "video-$index")
@@ -222,6 +334,37 @@ class HistoryRepositoryTest {
             target?.deviceBearer,
         )
         assertEquals("", target?.token)
+    }
+
+    @Test
+    fun `offline paired completion is queued for the paired account without a network check`() {
+        val instanceUrl = "https://invidious.example"
+        val account = AccountSession(instanceUrl, "legacy-token", "legacy-account")
+        val cachedCompanion = CompanionState(
+            session = CompanionSession(
+                instanceUrl = instanceUrl,
+                deviceId = "0123456789abcdef0123456789abcdef",
+                account = "@paired",
+                deviceBearer = TEST_DEVICE_BEARER,
+            ),
+        )
+
+        assertEquals(
+            pairedHistoryAccountKey(instanceUrl, "@paired"),
+            selectPendingHistoryAccountKey(instanceUrl, account, cachedCompanion),
+        )
+        assertNull(selectPendingHistoryAccountKey("https://other.example", account, cachedCompanion))
+    }
+
+    @Test
+    fun `pending completion never targets a legacy account from another instance`() {
+        val account = AccountSession("https://invidious.example", "token", "account")
+
+        assertEquals(
+            account.accountKey,
+            selectPendingHistoryAccountKey(account.instanceUrl, account, CompanionState()),
+        )
+        assertNull(selectPendingHistoryAccountKey("https://other.example", account, CompanionState()))
     }
 
     @Test
@@ -281,10 +424,23 @@ class HistoryRepositoryTest {
         thumbnailUrl = "https://example.test/$videoId.jpg",
     )
 
-    private class FakeHistoryDao : HistoryDao {
+    private class FakeHistoryDao : HistoryDao, WatchedVideoDao {
         private val searches = mutableMapOf<String, SearchHistoryEntity>()
         private val watches = mutableMapOf<String, WatchHistoryEntity>()
+        private val watched = mutableMapOf<String, WatchedVideoEntity>()
         private val outbox = mutableMapOf<Pair<String, String>, ServerHistoryOutboxEntity>()
+
+        override suspend fun markWatched(entity: WatchedVideoEntity) {
+            watched[entity.videoId] = entity
+        }
+
+        override suspend fun isWatched(videoId: String): Boolean = videoId in watched
+
+        override suspend fun watchedVideoIds(): List<String> = watched.keys.toList()
+
+        override suspend fun deleteWatched(videoId: String) {
+            watched.remove(videoId)
+        }
 
         override suspend fun listSearchHistory(limit: Int): List<SearchHistoryEntity> = searches.values
             .sortedByDescending(SearchHistoryEntity::lastSearchedAt)

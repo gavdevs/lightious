@@ -3,7 +3,6 @@ package com.loosewire.lightious.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -29,9 +28,11 @@ import com.loosewire.lightious.data.ExperienceMode
 import com.loosewire.lightious.data.FocusedChannelEntry
 import com.loosewire.lightious.data.FocusedLibraryFilter
 import com.loosewire.lightious.data.FocusedPlaylistEntry
+import com.loosewire.lightious.data.FocusedVideoEntry
 import com.loosewire.lightious.data.HomePage
 import com.loosewire.lightious.data.InvidiousApi
 import com.loosewire.lightious.data.effectiveExperienceMode
+import com.loosewire.lightious.data.channelFeedEntries
 import com.loosewire.lightious.data.focusedChannels
 import com.loosewire.lightious.data.focusedPlaylists
 import com.loosewire.lightious.data.normalizeInstanceUrl
@@ -68,6 +69,7 @@ import kotlinx.coroutines.launch
 
 sealed interface HomeMode {
     data class Loading(val message: String) : HomeMode
+    data class Failed(val message: String) : HomeMode
     data object Ready : HomeMode
     data class InstanceEditor(
         val initialValue: String,
@@ -87,8 +89,10 @@ data class HomeUiState(
     val account: AccountSession? = null,
     val companion: CompanionState = CompanionState(),
     val downloads: List<DownloadedMedia> = emptyList(),
-    val focusedTab: FocusedHomeTab = FocusedHomeTab.VIDEOS,
+    val focusedTab: FocusedHomeTab = FocusedHomeTab.CHANNELS,
     val focusedFilter: FocusedLibraryFilter = FocusedLibraryFilter.ALL,
+    val channelFeed: HomeChannelFeedState = HomeChannelFeedState.Loading,
+    val watchedVideoIds: Set<String> = emptySet(),
     val mode: HomeMode = HomeMode.Loading("Loading…"),
     val errorMessage: String? = null,
 )
@@ -102,6 +106,7 @@ class HomeViewModel(
 
     private var requestJob: Job? = null
     private var editorSession = 0
+    private val channelFeedCache = HomeChannelFeedCache()
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -109,11 +114,38 @@ class HomeViewModel(
                 _uiState.update { state -> state.copy(downloads = downloads) }
             }
         }
-        reload()
     }
 
-    fun reload() {
+    fun reload() = load(refreshFeed = true)
+
+    fun onShow() {
+        if (requestJob?.isActive == true) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val watchedVideoIds = services.history.watchedVideoIds()
+                    _uiState.update { it.copy(watchedVideoIds = watchedVideoIds) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    _uiState.update {
+                        it.copy(channelFeed = HomeChannelFeedState.Failed(error.userMessage("Could not read watched videos.")))
+                    }
+                }
+            }
+        } else {
+            load(refreshFeed = false)
+        }
+    }
+
+    private fun load(refreshFeed: Boolean) {
         requestJob?.cancel()
+        _uiState.update {
+            it.copy(
+                mode = HomeMode.Loading("Loading…"),
+                channelFeed = HomeChannelFeedState.Loading,
+                errorMessage = null,
+            )
+        }
         requestJob = viewModelScope.launch(Dispatchers.IO) {
             val settings = try {
                 services.settings.load()
@@ -122,8 +154,7 @@ class HomeViewModel(
             } catch (error: Exception) {
                 _uiState.update {
                     it.copy(
-                        mode = HomeMode.Loading("Could not load settings."),
-                        errorMessage = error.userMessage("Could not read saved settings."),
+                        mode = HomeMode.Failed(error.userMessage("Could not read saved settings.")),
                     )
                 }
                 return@launch
@@ -143,47 +174,21 @@ class HomeViewModel(
                 services.companion.load(settings.instanceUrl)
             } catch (error: CancellationException) {
                 throw error
-            } catch (_: Exception) {
-                CompanionState()
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(mode = HomeMode.Failed(error.userMessage("Could not read the saved pairing.")))
+                }
+                return@launch
             }
-            _uiState.update { current ->
-                current.copy(
-                    settings = settings,
-                    account = account,
-                    companion = cachedCompanion.copy(profile = null),
-                    mode = HomeMode.Ready,
-                    errorMessage = null,
-                )
-            }
-            var companion = cachedCompanion
-            var syncError: String? = null
-            if (cachedCompanion.session != null) {
-                services.companion.sync(settings.instanceUrl).fold(
-                    onSuccess = { profile -> companion = cachedCompanion.copy(profile = profile) },
-                    onFailure = { error ->
-                        // A paired Home must not display a stale Focused library.
-                        // Playback also revalidates, but visibility is part of the
-                        // companion contract rather than a security boundary.
-                        companion = try {
-                            services.companion.load(settings.instanceUrl).copy(profile = null)
-                        } catch (loadError: CancellationException) {
-                            throw loadError
-                        } catch (_: Exception) {
-                            CompanionState()
-                        }
-                        syncError = error.userMessage("Could not sync the companion.")
-                    },
-                )
-            }
-            _uiState.update { current ->
-                current.copy(
-                    settings = settings,
-                    account = account,
-                    companion = companion,
-                    mode = HomeMode.Ready,
-                    errorMessage = syncError,
-                )
-            }
+            val companion = loadHomeLibrary(
+                state = _uiState,
+                settings = settings,
+                account = account,
+                cachedCompanion = cachedCompanion,
+                syncCompanion = { services.companion.sync(settings.instanceUrl) },
+                reloadCompanion = { services.companion.load(settings.instanceUrl) },
+            )
+            loadChannelFeed(settings, companion, refreshFeed)
             companion.session?.deviceId?.let { ownerDeviceId ->
                 services.downloads.recoverInterruptedDownloads(ownerDeviceId).forEach { download ->
                     if (!resumeInterruptedDownload(download)) {
@@ -195,6 +200,36 @@ class HomeViewModel(
                         )
                     }
                 }
+            }
+        }
+    }
+
+    private suspend fun loadChannelFeed(
+        settings: ClientSettings,
+        companion: CompanionState,
+        refresh: Boolean,
+    ) {
+        val profile = companion.profile ?: return
+        if (profile.mode != ExperienceMode.FOCUSED || profile.channels.isEmpty()) return
+        val deviceBearer = companion.session?.deviceBearer ?: return
+        try {
+            val page = channelFeedCache.load(settings.instanceUrl, profile, refresh) {
+                InvidiousApi(
+                    baseUrl = settings.instanceUrl,
+                    proxyMedia = settings.proxyMedia,
+                    deviceBearer = deviceBearer,
+                    audioLanguage = settings.audioLanguage,
+                ).use { api -> api.channelFeed() }
+            }
+            val watchedVideoIds = services.history.watchedVideoIds()
+            _uiState.update {
+                it.copy(channelFeed = HomeChannelFeedState.Loaded(page), watchedVideoIds = watchedVideoIds)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            _uiState.update {
+                it.copy(channelFeed = HomeChannelFeedState.Failed(error.userMessage("Could not load channel releases.")))
             }
         }
     }
@@ -301,7 +336,7 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
     )
 
     override fun willShow() {
-        viewModel.reload()
+        viewModel.onShow()
     }
 
     @Composable
@@ -322,30 +357,27 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
             ) {
                 when (val mode = state.mode) {
                     is HomeMode.Loading -> LoadingContent(mode.message)
-                    HomeMode.Ready -> when {
-                        experienceMode == ExperienceMode.FOCUSED -> FocusedHomeContent(
-                            profile = companionProfile,
-                            downloads = pairedDownloads,
-                            paired = state.companion.session != null,
-                            selectedTab = state.focusedTab,
-                            selectedFilter = state.focusedFilter,
-                            onVideo = ::openFocusedVideo,
-                            onChannel = ::openFocusedChannel,
-                            onPlaylist = ::openFocusedPlaylist,
-                            onDownload = ::openDownload,
-                            onTab = viewModel::selectFocusedTab,
-                            onFilter = viewModel::selectFocusedFilter,
-                            onSearch = { openFocusedSearch(companionProfile, pairedDownloads) },
-                            onRefresh = viewModel::reload,
-                            onSettings = ::openSettings,
-                        )
-                        else -> HomeMenuContent(
-                            settings = state.settings,
-                            signedIn = state.account != null,
-                            onPage = ::openPage,
-                            onSettings = ::openSettings,
-                        )
-                    }
+                    is HomeMode.Failed -> HomeFailureContent(mode.message, viewModel::reload, ::openSettings)
+                    HomeMode.Ready -> FocusedHomeContent(
+                        profile = companionProfile,
+                        experienceMode = experienceMode,
+                        channelFeed = state.channelFeed,
+                        watchedVideoIds = state.watchedVideoIds,
+                        downloads = pairedDownloads,
+                        paired = state.companion.session != null,
+                        selectedTab = state.focusedTab,
+                        selectedFilter = state.focusedFilter,
+                        onVideo = ::openFocusedVideo,
+                        onFeedVideo = ::openFeedVideo,
+                        onChannel = ::openFocusedChannel,
+                        onPlaylist = ::openFocusedPlaylist,
+                        onDownload = ::openDownload,
+                        onTab = viewModel::selectFocusedTab,
+                        onSearch = { openFocusedSearch(companionProfile, pairedDownloads) },
+                        onOptions = ::openFocusedOptions,
+                        onRefresh = viewModel::reload,
+                        onSettings = ::openSettings,
+                    )
                     is HomeMode.InstanceEditor -> InitialInstanceEditor(mode, viewModel)
                 }
 
@@ -356,29 +388,38 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
         }
     }
 
-    private fun openPage(page: HomePage) {
-        when (page) {
-            HomePage.SEARCH -> navigateTo(
-                screenFactory = { activity -> SearchScreen(activity, services) },
-            )
-            HomePage.ACCOUNT_FEED,
-            HomePage.POPULAR,
-            -> navigateTo(
-                screenFactory = { activity -> NetworkPageScreen(activity, services, page) },
-            )
-            HomePage.WATCH_HISTORY ->
-                navigateTo(
-                    screenFactory = { activity -> WatchHistoryScreen(activity, services) },
-                )
-            HomePage.SEARCH_HISTORY ->
-                navigateTo(
-                    screenFactory = { activity -> SearchHistoryScreen(activity, services) },
-                )
-        }
-    }
-
     private fun openSettings() {
         navigateTo(screenFactory = { activity -> SettingsScreen(activity, services) })
+    }
+
+    private fun openFocusedOptions() {
+        val state = viewModel.uiState.value
+        navigateTo(
+            screenFactory = { activity ->
+                FocusedOptionsScreen(
+                    sealedActivity = activity,
+                    title = "Library Options",
+                    selectedFilter = state.focusedFilter,
+                    trailingActions = listOf(FocusedOptionsAction.REFRESH, FocusedOptionsAction.SETTINGS),
+                )
+            },
+            resultCallback = { result ->
+                when (result) {
+                    is FocusedOptionsResult.SelectFilter -> viewModel.selectFocusedFilter(result.filter)
+                    is FocusedOptionsResult.RunAction -> when (result.action) {
+                        FocusedOptionsAction.SEARCH -> {
+                            val current = viewModel.uiState.value
+                            val downloads = current.companion.session?.deviceId?.let { ownerDeviceId ->
+                                current.downloads.filter { download -> download.ownerDeviceId == ownerDeviceId }
+                            }.orEmpty()
+                            openFocusedSearch(current.companion.profile, downloads)
+                        }
+                        FocusedOptionsAction.REFRESH -> viewModel.reload()
+                        FocusedOptionsAction.SETTINGS -> openSettings()
+                    }
+                }
+            },
+        )
     }
 
     private fun openFocusedVideo(video: CuratedVideo) {
@@ -390,9 +431,18 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
     }
 
     private fun openFocusedChannel(channel: FocusedChannelEntry) {
+        if (viewModel.uiState.value.companion.profile?.mode != ExperienceMode.LIBRARY) return
         navigateTo(
             screenFactory = { activity ->
                 FocusedChannelScreen(activity, services, viewModel.uiState.value.settings, channel)
+            },
+        )
+    }
+
+    private fun openFeedVideo(entry: FocusedVideoEntry) {
+        navigateTo(
+            screenFactory = { activity ->
+                VideoScreen(activity, viewModel.uiState.value.settings, entry.video, services)
             },
         )
     }
@@ -431,17 +481,21 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
 @Composable
 private fun FocusedHomeContent(
     profile: CompanionProfile?,
+    experienceMode: ExperienceMode,
+    channelFeed: HomeChannelFeedState,
+    watchedVideoIds: Set<String>,
     downloads: List<DownloadedMedia>,
     paired: Boolean,
     selectedTab: FocusedHomeTab,
     selectedFilter: FocusedLibraryFilter,
     onVideo: (CuratedVideo) -> Unit,
+    onFeedVideo: (FocusedVideoEntry) -> Unit,
     onChannel: (FocusedChannelEntry) -> Unit,
     onPlaylist: (FocusedPlaylistEntry) -> Unit,
     onDownload: (DownloadedMedia) -> Unit,
     onTab: (FocusedHomeTab) -> Unit,
-    onFilter: (FocusedLibraryFilter) -> Unit,
     onSearch: () -> Unit,
+    onOptions: () -> Unit,
     onRefresh: () -> Unit,
     onSettings: () -> Unit,
 ) {
@@ -456,15 +510,20 @@ private fun FocusedHomeContent(
                 contentDescription = "Search library",
             ),
             center = LightTopBarCenter.Text(selectedTab.focusedTitle()),
-            rightButton = LightBarButton.LightIcon(
-                icon = LightIcons.SETTINGS,
-                onClick = onSettings,
-                contentDescription = "Settings",
-            ),
+            rightButton = if (selectedTab == FocusedHomeTab.DOWNLOADS) {
+                LightBarButton.LightIcon(
+                    icon = LightIcons.SETTINGS,
+                    onClick = onSettings,
+                    contentDescription = "Settings",
+                )
+            } else {
+                LightBarButton.LightIcon(
+                    icon = LightIcons.ELLIPSES,
+                    onClick = onOptions,
+                    contentDescription = "Library options",
+                )
+            },
         )
-        if (selectedTab != FocusedHomeTab.DOWNLOADS && profile != null) {
-            FocusedFilterRow(selectedFilter = selectedFilter, onFilter = onFilter)
-        }
         LightScrollView(
             modifier = Modifier
                 .weight(1f)
@@ -495,7 +554,16 @@ private fun FocusedHomeContent(
                 } else {
                     videos.forEach { video -> VideoRow(video.asVideoSummary()) { onVideo(video) } }
                 }
-                FocusedHomeTab.CHANNELS -> if (channels.isEmpty()) {
+                FocusedHomeTab.CHANNELS -> if (experienceMode == ExperienceMode.FOCUSED) {
+                    FocusedChannelFeedContent(
+                        profile = profile,
+                        state = channelFeed,
+                        watchedVideoIds = watchedVideoIds,
+                        filter = selectedFilter,
+                        onVideo = onFeedVideo,
+                        onRetry = onRefresh,
+                    )
+                } else if (channels.isEmpty()) {
                     FocusedEmptyMessage("No channels match this filter. Add a channel from the companion website.")
                 } else {
                     channels.forEach { channel -> ChannelRow(channel) { onChannel(channel) } }
@@ -540,26 +608,44 @@ private fun FocusedHomeContent(
 }
 
 @Composable
-internal fun FocusedFilterRow(
-    selectedFilter: FocusedLibraryFilter,
-    onFilter: (FocusedLibraryFilter) -> Unit,
+private fun FocusedChannelFeedContent(
+    profile: CompanionProfile?,
+    state: HomeChannelFeedState,
+    watchedVideoIds: Set<String>,
+    filter: FocusedLibraryFilter,
+    onVideo: (FocusedVideoEntry) -> Unit,
+    onRetry: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 1f.gridUnitsAsDp()),
-    ) {
-        FocusedLibraryFilter.entries.forEach { filter ->
-            LightText(
-                text = filter.filterLabel(),
-                variant = LightTextVariant.Button,
-                underline = filter == selectedFilter,
-                align = TextAlign.Center,
-                modifier = Modifier
-                    .weight(1f)
-                    .lightClickable(onClick = { onFilter(filter) })
-                    .padding(vertical = 0.45f.gridUnitsAsDp()),
-            )
+    if (profile == null) return
+    if (profile.channels.isEmpty()) {
+        FocusedEmptyMessage("Add a channel on the companion website to see its recent releases here.")
+        return
+    }
+    when (state) {
+        HomeChannelFeedState.Loading -> FocusedEmptyMessage("Loading channel releases…")
+        is HomeChannelFeedState.Failed -> {
+            FocusedEmptyMessage(state.message)
+            ActionRow("RETRY", onRetry)
+        }
+        is HomeChannelFeedState.Loaded -> {
+            val entries = profile.channelFeedEntries(state.page.videos, watchedVideoIds)
+                .filter { entry -> filter.includes(entry.playbackPolicy) }
+            if (state.page.failedChannelIds.isNotEmpty()) {
+                FocusedEmptyMessage("Some channels could not be refreshed.")
+                ActionRow("RETRY", onRetry)
+            }
+            if (entries.isEmpty() && state.page.failedChannelIds.isEmpty()) {
+                FocusedEmptyMessage(
+                    when {
+                        filter != FocusedLibraryFilter.ALL -> "No recent releases match this filter."
+                        profile.hideWatched -> "No recent unwatched videos."
+                        else -> "No recent videos."
+                    },
+                )
+            }
+            entries.forEach { entry ->
+                VideoRow(entry.rowSummary()) { onVideo(entry) }
+            }
         }
     }
 }
@@ -573,81 +659,11 @@ private fun FocusedEmptyMessage(message: String) {
     )
 }
 
-internal fun FocusedLibraryFilter.filterLabel(): String = when (this) {
-    FocusedLibraryFilter.ALL -> "ALL"
-    FocusedLibraryFilter.LISTEN -> "AUDIO"
-    FocusedLibraryFilter.WATCH -> "VIDEO"
-}
-
 private fun FocusedHomeTab.focusedTitle(): String = when (this) {
     FocusedHomeTab.VIDEOS -> "Videos"
     FocusedHomeTab.CHANNELS -> "Channels"
     FocusedHomeTab.PLAYLISTS -> "Playlists"
     FocusedHomeTab.DOWNLOADS -> "Downloads"
-}
-
-@Composable
-private fun HomeMenuContent(
-    settings: ClientSettings,
-    signedIn: Boolean,
-    onPage: (HomePage) -> Unit,
-    onSettings: () -> Unit,
-) {
-    Column(modifier = Modifier.fillMaxSize()) {
-        LightTopBar(
-            center = LightTopBarCenter.Text("Lightious"),
-            rightButton = LightBarButton.LightIcon(
-                icon = LightIcons.SETTINGS,
-                onClick = onSettings,
-                contentDescription = "Settings",
-            ),
-        )
-        LightScrollView(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 1f.gridUnitsAsDp()),
-        ) {
-            if (settings.homePages.isEmpty()) {
-                LightText(
-                    text = "Choose at least one bottom navigation page in Settings.",
-                    variant = LightTextVariant.Copy,
-                    modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
-                )
-            } else {
-                LightText(
-                    text = "Choose a page from the bottom bar.",
-                    variant = LightTextVariant.Subheading,
-                    modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
-                )
-                LightText(
-                    text = settings.homePages.joinToString("  ·  ") { it.homeLabel() },
-                    variant = LightTextVariant.Detail,
-                    lighten = true,
-                    modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
-                )
-                if (HomePage.ACCOUNT_FEED in settings.homePages && !signedIn) {
-                    LightText(
-                        text = "Sign in from Settings to use subscriptions.",
-                        variant = LightTextVariant.Detail,
-                        lighten = true,
-                        modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
-                    )
-                }
-            }
-        }
-        if (settings.homePages.isNotEmpty()) {
-            LightBottomBar(
-                items = settings.homePages.distinct().map { page ->
-                    LightBarButton.LightIcon(
-                        icon = page.homeIcon(),
-                        onClick = { onPage(page) },
-                        contentDescription = page.homeLabel(),
-                    )
-                },
-            )
-        }
-    }
 }
 
 @Composable
@@ -681,6 +697,33 @@ internal fun LoadingContent(message: String, title: String = "Lightious") {
             contentAlignment = Alignment.Center,
         ) {
             LightText(text = message, variant = LightTextVariant.Copy, align = TextAlign.Center)
+        }
+    }
+}
+
+@Composable
+private fun HomeFailureContent(message: String, onRetry: () -> Unit, onSettings: () -> Unit) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        LightTopBar(
+            center = LightTopBarCenter.Text("Lightious"),
+            rightButton = LightBarButton.LightIcon(
+                icon = LightIcons.SETTINGS,
+                onClick = onSettings,
+                contentDescription = "Settings",
+            ),
+        )
+        LightScrollView(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 1f.gridUnitsAsDp()),
+        ) {
+            LightText(
+                text = message,
+                variant = LightTextVariant.Copy,
+                modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
+            )
+            ActionRow("RETRY", onRetry)
         }
     }
 }
@@ -720,14 +763,6 @@ internal fun HomePage.homeLabel(): String = when (this) {
     HomePage.WATCH_HISTORY -> "WATCH HISTORY"
     HomePage.SEARCH_HISTORY -> "SEARCH HISTORY"
     HomePage.POPULAR -> "POPULAR"
-}
-
-private fun HomePage.homeIcon() = when (this) {
-    HomePage.SEARCH -> LightIcons.SEARCH
-    HomePage.ACCOUNT_FEED -> LightIcons.CONTACTS
-    HomePage.WATCH_HISTORY -> LightIcons.PLAY
-    HomePage.SEARCH_HISTORY -> LightIcons.LIST
-    HomePage.POPULAR -> LightIcons.STAR
 }
 
 internal fun Throwable.userMessage(fallback: String): String =

@@ -1,15 +1,37 @@
 package com.loosewire.lightious.data
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 
-@Serializable
+@Serializable(with = ExperienceModeSerializer::class)
 enum class ExperienceMode(val wireValue: String) {
-    EXPLORE("explore"),
     FOCUSED("focused"),
+    LIBRARY("library"),
     ;
 
     companion object {
-        fun fromWire(value: String): ExperienceMode? = entries.firstOrNull { it.wireValue == value }
+        fun fromWire(value: String): ExperienceMode? = when (value) {
+            // Old servers and cached profiles must never restore unrestricted browsing.
+            "explore" -> LIBRARY
+            else -> entries.firstOrNull { it.wireValue == value }
+        }
+    }
+}
+
+internal object ExperienceModeSerializer : KSerializer<ExperienceMode> {
+    override val descriptor = PrimitiveSerialDescriptor("ExperienceMode", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: ExperienceMode) = encoder.encodeString(value.name)
+
+    override fun deserialize(decoder: Decoder): ExperienceMode {
+        val value = decoder.decodeString()
+        return ExperienceMode.fromWire(value.lowercase())
+            ?: throw SerializationException("Unknown experience mode: $value")
     }
 }
 
@@ -76,6 +98,8 @@ data class CompanionProfile(
     val channels: List<CuratedChannel> = emptyList(),
     val playlists: List<CuratedPlaylist> = emptyList(),
     val blockedVideoIds: Set<String> = emptySet(),
+    val channelFeedLimit: Int = DEFAULT_CHANNEL_FEED_LIMIT,
+    val hideWatched: Boolean = true,
 )
 
 internal fun CompanionProfile?.effectiveExperienceMode(): ExperienceMode =

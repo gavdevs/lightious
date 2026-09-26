@@ -9,6 +9,7 @@ import com.loosewire.lightious.data.HistoryDatabase
 import com.loosewire.lightious.data.HistoryRepository
 import com.loosewire.lightious.data.HistorySyncer
 import com.loosewire.lightious.data.SettingsStore
+import com.loosewire.lightious.data.WatchedDatabase
 import com.thelightphone.sdk.SealedLightContext
 import com.thelightphone.sdk.buildDatabase
 
@@ -30,6 +31,8 @@ class LightiousServices private constructor(
                     val history = HistoryRepository(
                         context.buildDatabase(HistoryDatabase::class.java, HistoryDatabase.NAME)
                             .historyDao(),
+                        context.buildDatabase(WatchedDatabase::class.java, WatchedDatabase.NAME)
+                            .watchedVideoDao(),
                     )
                     val downloads = DownloadRepository(
                         context.buildDatabase(DownloadsDatabase::class.java, DownloadsDatabase.NAME)

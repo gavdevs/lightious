@@ -61,6 +61,20 @@ data class FocusedChannelEntry(
         }
         return entries.distinctBy { entry -> entry.video.videoId }
     }
+
+    fun searchResultsWithPolicy(results: List<VideoSummary>): List<FocusedVideoEntry> {
+        val curatedById = curatedVideos
+            .filter { video -> !video.isShort && video.videoId !in blockedVideoIds }
+            .associateBy(CuratedVideo::videoId)
+        return results.mapNotNull { video ->
+            if (video.isShort || video.videoId in blockedVideoIds || video.authorId != channelId) {
+                return@mapNotNull null
+            }
+            val policy = curatedById[video.videoId]?.playbackPolicy ?: channelPolicy
+                ?: return@mapNotNull null
+            FocusedVideoEntry(video, policy)
+        }.distinctBy { entry -> entry.video.videoId }
+    }
 }
 
 data class FocusedPlaylistEntry(
@@ -169,7 +183,8 @@ fun CompanionProfile?.searchFocusedLibrary(
     val focusedPlaylists = this?.focusedPlaylists().orEmpty()
     return FocusedLibrarySearchResults(
         videos = this?.allCuratedVideos().orEmpty().filter(CuratedVideo::matchesSearch),
-        channels = this?.focusedChannels().orEmpty().filter { channel ->
+        channels = this?.takeIf { profile -> profile.mode == ExperienceMode.LIBRARY }
+            ?.focusedChannels().orEmpty().filter { channel ->
             matches(channel.name, channel.channelId)
         },
         playlists = focusedPlaylists.filter { playlist ->

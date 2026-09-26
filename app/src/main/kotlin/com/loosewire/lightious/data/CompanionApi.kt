@@ -124,6 +124,8 @@ class CompanionApi internal constructor(
                 }
                 videoId
             },
+            channelFeedLimit = dto.channelFeedLimit.coerceIn(CHANNEL_FEED_LIMIT_RANGE),
+            hideWatched = dto.hideWatched,
         )
     }
 
@@ -199,6 +201,8 @@ private data class SyncResponse(
     val channels: List<SyncChannelResponse> = emptyList(),
     val playlists: List<SyncPlaylistResponse> = emptyList(),
     val blockedVideoIds: List<String> = emptyList(),
+    val channelFeedLimit: Int = DEFAULT_CHANNEL_FEED_LIMIT,
+    val hideWatched: Boolean = true,
 )
 
 @Serializable

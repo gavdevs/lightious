@@ -97,6 +97,47 @@ class CompanionApiTest {
         api.close()
     }
 
+    @Test
+    fun `sync defaults feed settings for older servers and maps explore to library`() = runTest {
+        CompanionApi("https://invidious.example", SyncSettingsTransport("\"mode\":\"explore\"")).use { api ->
+            val profile = api.sync(DEVICE_BEARER).getOrThrow()
+
+            assertEquals(ExperienceMode.LIBRARY, profile.mode)
+            assertEquals(3, profile.channelFeedLimit)
+            assertTrue(profile.hideWatched)
+        }
+    }
+
+    @Test
+    fun `sync reads bounded feed preferences and rejects unknown modes`() = runTest {
+        listOf(0 to 1, 5 to 5, 100 to 5).forEach { (received, expected) ->
+            CompanionApi(
+                "https://invidious.example",
+                SyncSettingsTransport("\"mode\":\"focused\",\"channelFeedLimit\":$received,\"hideWatched\":false"),
+            ).use { api ->
+                val profile = api.sync(DEVICE_BEARER).getOrThrow()
+
+                assertEquals(expected, profile.channelFeedLimit)
+                assertFalse(profile.hideWatched)
+            }
+        }
+        CompanionApi("https://invidious.example", SyncSettingsTransport("\"mode\":\"unknown\"")).use { api ->
+            assertTrue(api.sync(DEVICE_BEARER).isFailure)
+        }
+    }
+
+    private class SyncSettingsTransport(private val fields: String) : CompanionHttpTransport {
+        override suspend fun get(url: String, headers: Map<String, String>) = InvidiousHttpResponse(
+            200,
+            """{"deviceId":"$DEVICE_ID","account":"gav","revision":1,$fields}""",
+        )
+
+        override suspend fun post(url: String, headers: Map<String, String>, body: String): InvidiousHttpResponse =
+            error("Unexpected POST: $url")
+
+        override fun close() = Unit
+    }
+
     private data class Request(val url: String, val headers: Map<String, String>, val body: String = "")
 
     private class FakeCompanionTransport : CompanionHttpTransport {

@@ -20,12 +20,9 @@ import com.loosewire.lightious.data.AccountSession
 import com.loosewire.lightious.data.AudioLanguagePreference
 import com.loosewire.lightious.data.ClientSettings
 import com.loosewire.lightious.data.CompanionState
-import com.loosewire.lightious.data.ExperienceMode
-import com.loosewire.lightious.data.HomePage
 import com.loosewire.lightious.data.InvidiousApi
 import com.loosewire.lightious.data.authTokenAllowsHistoryWrite
 import com.loosewire.lightious.data.buildAuthorizationUrl
-import com.loosewire.lightious.data.effectiveExperienceMode
 import com.loosewire.lightious.data.normalizeAuthToken
 import com.loosewire.lightious.data.normalizeInstanceUrl
 import com.loosewire.lightious.data.pairedHistoryAccountKey
@@ -221,11 +218,6 @@ class SettingsScreen(
                                 screenFactory = { activity -> CompanionScreen(activity, services) },
                             )
                         },
-                        onPages = {
-                            navigateTo(
-                                screenFactory = { activity -> HomePagesScreen(activity, services) },
-                            )
-                        },
                         onAudioLanguage = {
                             navigateTo(
                                 screenFactory = { activity ->
@@ -238,8 +230,6 @@ class SettingsScreen(
                             )
                         },
                         onSelfHost = viewModel::toggleSelfHost,
-                        onProxy = viewModel::toggleProxyMedia,
-                        onSearchHistory = viewModel::toggleSearchHistory,
                         onWatchHistory = viewModel::toggleWatchHistory,
                     )
                 }
@@ -258,11 +248,8 @@ private fun SettingsContent(
     onInstance: () -> Unit,
     onAccount: () -> Unit,
     onCompanion: () -> Unit,
-    onPages: () -> Unit,
     onAudioLanguage: () -> Unit,
     onSelfHost: () -> Unit,
-    onProxy: () -> Unit,
-    onSearchHistory: () -> Unit,
     onWatchHistory: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -305,64 +292,36 @@ private fun SettingsContent(
             if (state.settings.selfHostEnabled) {
                 SettingRow("INVIDIOUS SERVER", state.settings.instanceUrl, onInstance)
             }
-            if (state.companion.profile.effectiveExperienceMode() == ExperienceMode.FOCUSED) {
-                LightText(
-                    text = if (state.settings.selfHostEnabled) {
-                        if (state.settings.managedServerAvailable) {
-                            "Self-hosting is intended for compatible Lightious servers. Your saved server is kept if you turn it off."
-                        } else {
-                            "A managed Lightious server is not configured yet, so Self-host is required for this build."
-                        }
+            LightText(
+                text = if (state.settings.selfHostEnabled) {
+                    if (state.settings.managedServerAvailable) {
+                        "Self-hosting is intended for compatible Lightious servers. Your saved server is kept if you turn it off."
                     } else {
-                        "Server details stay hidden. Turn on Self-host only if you run a compatible Lightious server."
-                    },
-                    variant = LightTextVariant.Detail,
-                    lighten = true,
-                    modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
-                )
-            } else {
-                SettingRow(
-                    "ACCOUNT",
-                    if (state.signedIn) "SIGNED IN" else "NOT SIGNED IN",
-                    onAccount,
-                )
-                SettingRow(
-                    "BOTTOM NAVIGATION",
-                    state.settings.homePages.joinToString(" · ") { it.homeLabel() },
-                    onPages,
-                )
-                SettingRow(
-                    "PROXY MEDIA",
-                    if (state.companion.session != null) {
-                        "PAIRED — GATEWAY REQUIRED"
-                    } else if (state.settings.proxyMedia) {
-                        "ON"
-                    } else {
-                        "OFF"
-                    },
-                    onProxy,
-                )
-                SettingRow(
-                    "SAVE SEARCH HISTORY",
-                    if (state.settings.saveSearchHistory) "ON — local only" else "OFF — existing entries kept",
-                    onSearchHistory,
-                )
-                SettingRow(
-                    "SAVE WATCH HISTORY",
-                    if (state.settings.saveWatchHistory) "ON — local only" else "OFF — existing entries kept",
-                    onWatchHistory,
-                )
-                LightText(
-                    text = if (state.companion.session != null) {
-                        "Search history stays on this phone. Watched-state sync is controlled in Account, and paired playback always uses the companion gateway."
-                    } else {
-                        "Search history stays on this phone. Watched-state sync is controlled in Account."
-                    },
-                    variant = LightTextVariant.Detail,
-                    lighten = true,
-                    modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
-                )
-            }
+                        "A managed Lightious server is not configured yet, so Self-host is required for this build."
+                    }
+                } else {
+                    "Server details stay hidden. Turn on Self-host only if you run a compatible Lightious server."
+                },
+                variant = LightTextVariant.Detail,
+                lighten = true,
+                modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
+            )
+            SettingRow(
+                "SAVE WATCH HISTORY",
+                if (state.settings.saveWatchHistory) "ON — local only" else "OFF — existing entries kept",
+                onWatchHistory,
+            )
+            SettingRow(
+                "ACCOUNT",
+                if (state.signedIn) "SIGNED IN" else "NOT SIGNED IN",
+                onAccount,
+            )
+            LightText(
+                text = "Mark Watched controls the channel feed on this phone, even when watch history is off. Optional account history sync is managed in Account.",
+                variant = LightTextVariant.Detail,
+                lighten = true,
+                modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
+            )
         }
     }
 }
@@ -406,119 +365,6 @@ class AudioLanguageScreen(
                         lighten = true,
                         modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
                     )
-                }
-            }
-        }
-    }
-}
-
-data class HomePagesUiState(
-    val settings: ClientSettings = ClientSettings(),
-    val loading: Boolean = true,
-    val errorMessage: String? = null,
-)
-
-class HomePagesViewModel(
-    private val services: LightiousServices,
-) : LightViewModel<Unit>() {
-    private val _uiState = MutableStateFlow(HomePagesUiState())
-    val uiState: StateFlow<HomePagesUiState> = _uiState.asStateFlow()
-    private var requestJob: Job? = null
-
-    init {
-        load()
-    }
-
-    fun load() {
-        requestJob?.cancel()
-        requestJob = viewModelScope.launch(Dispatchers.IO) {
-            val settings = services.settings.load()
-            _uiState.value = HomePagesUiState(settings = settings, loading = false)
-        }
-    }
-
-    fun toggle(page: HomePage) {
-        val current = _uiState.value.settings.homePages
-        val next = if (page in current) {
-            if (current.size == 1) {
-                _uiState.update { it.copy(errorMessage = "Keep at least one page on Home.") }
-                return
-            }
-            current - page
-        } else {
-            (current + page).sortedBy { HomePage.entries.indexOf(it) }
-        }
-        requestJob?.cancel()
-        requestJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                services.settings.setHomePages(next)
-                requestJob = null
-                load()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                _uiState.update { it.copy(errorMessage = error.userMessage("Could not save Home pages.")) }
-            }
-        }
-    }
-
-    fun dismissError() {
-        _uiState.update { it.copy(errorMessage = null) }
-    }
-}
-
-class HomePagesScreen(
-    sealedActivity: SealedLightActivity,
-    private val services: LightiousServices,
-) : LightScreen<Unit, HomePagesViewModel>(sealedActivity) {
-    override val viewModelClass = HomePagesViewModel::class.java
-
-    override fun createViewModel() = HomePagesViewModel(services)
-
-    @Composable
-    override fun Content() {
-        val colors by LightThemeController.colors.collectAsState()
-        val state by viewModel.uiState.collectAsState()
-        LightTheme(colors = colors) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(LightThemeTokens.colors.background),
-            ) {
-                if (state.loading) {
-                    LoadingContent("Loading…", "Bottom Navigation")
-                } else {
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        LightTopBar(
-                            leftButton = LightBarButton.LightIcon(
-                                icon = LightIcons.BACK,
-                                onClick = { goBack() },
-                                contentDescription = "Back",
-                            ),
-                            center = LightTopBarCenter.Text("Bottom Navigation"),
-                        )
-                        LightScrollView(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 1f.gridUnitsAsDp()),
-                        ) {
-                            HomePage.entries.forEach { page ->
-                                SettingRow(
-                                    page.homeLabel(),
-                                    if (page in state.settings.homePages) "SHOWN" else "HIDDEN",
-                                ) { viewModel.toggle(page) }
-                            }
-                            LightText(
-                                text = "Popular is optional and is never loaded unless you open it.",
-                                variant = LightTextVariant.Detail,
-                                lighten = true,
-                                modifier = Modifier.padding(top = 1f.gridUnitsAsDp()),
-                            )
-                        }
-                    }
-                }
-                state.errorMessage?.let { message ->
-                    LightFullscreenModal(message = message, onClose = viewModel::dismissError)
                 }
             }
         }

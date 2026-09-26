@@ -5,8 +5,53 @@ import com.loosewire.lightious.data.DownloadState
 import com.loosewire.lightious.data.DownloadedMedia
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class DownloadedMediaScreenTest {
+    @Test
+    fun `video download uses listening controls after an audio handoff`() {
+        val state = DownloadedMediaUiState(
+            loaded = true,
+            download = download(DownloadState.COMPLETE, DownloadKind.VIDEO),
+        )
+
+        assertFalse(downloadedMediaPresentsAudio(state))
+        assertTrue(downloadedMediaPresentsAudio(state.copy(audioStarted = true)))
+        assertEquals(DownloadPrimaryAction.WATCH_VIDEO, downloadedMediaPrimaryAction(state.download))
+    }
+
+    @Test
+    fun `audio downloads retain listening controls before playback starts`() {
+        val state = DownloadedMediaUiState(
+            loaded = true,
+            download = download(DownloadState.COMPLETE, DownloadKind.AUDIO),
+        )
+
+        assertTrue(downloadedMediaPresentsAudio(state))
+        assertEquals(DownloadPrimaryAction.PLAY_AUDIO, downloadedMediaPrimaryAction(state.download))
+    }
+
+    @Test
+    fun `stale audio state cannot make an unavailable download playable`() {
+        for (state in listOf(DownloadState.QUEUED, DownloadState.DOWNLOADING, DownloadState.FAILED)) {
+            assertFalse(
+                downloadedMediaPresentsAudio(
+                    DownloadedMediaUiState(download = download(state), audioStarted = true),
+                ),
+            )
+        }
+        assertFalse(downloadedMediaPresentsAudio(DownloadedMediaUiState(audioStarted = true)))
+        assertFalse(
+            downloadedMediaPresentsAudio(
+                DownloadedMediaUiState(
+                    download = download(DownloadState.COMPLETE, isShort = true),
+                    audioStarted = true,
+                ),
+            ),
+        )
+    }
+
     @Test
     fun `download action follows persisted state and media kind`() {
         assertEquals(DownloadPrimaryAction.NONE, downloadedMediaPrimaryAction(null))

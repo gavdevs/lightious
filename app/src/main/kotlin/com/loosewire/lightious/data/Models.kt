@@ -66,11 +66,18 @@ data class VideoSummary(
     val thumbnailUrl: String? = null,
     val authorId: String? = null,
     val isShort: Boolean = false,
+    val published: Long = 0L,
+    val isUpcoming: Boolean = false,
 )
 
 data class ChannelVideosPage(
     val videos: List<VideoSummary>,
     val continuation: String? = null,
+)
+
+data class ChannelSearchPage(
+    val videos: List<VideoSummary>,
+    val nextPage: Int? = null,
 )
 
 data class SearchHistoryEntry(
@@ -224,6 +231,9 @@ internal data class InvidiousVideoItemDto(
     val liveNow: JsonElement? = null,
     val videoThumbnails: List<InvidiousThumbnailDto>? = null,
     val isShort: JsonElement? = null,
+    val published: JsonElement? = null,
+    val isUpcoming: JsonElement? = null,
+    val premiereTimestamp: JsonElement? = null,
 )
 
 @Serializable
@@ -244,6 +254,9 @@ internal data class InvidiousVideoDto(
     val hlsUrl: String? = null,
     val dashUrl: String? = null,
     val isShort: JsonElement? = null,
+    val published: JsonElement? = null,
+    val isUpcoming: JsonElement? = null,
+    val premiereTimestamp: JsonElement? = null,
 )
 
 @Serializable
@@ -266,6 +279,18 @@ internal data class InvidiousSoftwareDto(
 internal data class InvidiousChannelVideosDto(
     val videos: List<InvidiousVideoItemDto> = emptyList(),
     val continuation: String? = null,
+)
+
+@Serializable
+internal data class InvidiousChannelFeedDto(
+    val videos: List<InvidiousVideoItemDto>,
+    val failedChannelIds: List<String> = emptyList(),
+)
+
+@Serializable
+internal data class InvidiousChannelSearchDto(
+    val videos: List<InvidiousVideoItemDto> = emptyList(),
+    val nextPage: Int? = null,
 )
 
 @Serializable

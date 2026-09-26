@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -76,8 +77,18 @@ internal data class DownloadedMediaUiState(
     val loaded: Boolean = false,
     val download: DownloadedMedia? = null,
     val audioStarted: Boolean = false,
+    val changingPlayback: Boolean = false,
+    val finished: Boolean = false,
+    val watched: Boolean = false,
+    val savingWatched: Boolean = false,
     val errorMessage: String? = null,
 )
+
+internal fun downloadedMediaPresentsAudio(state: DownloadedMediaUiState): Boolean =
+    state.download?.let { download ->
+        download.state == DownloadState.COMPLETE && !download.isShort &&
+            (download.kind == DownloadKind.AUDIO || state.audioStarted)
+    } == true
 
 internal class DownloadedMediaViewModel(
     private val services: LightiousServices,
@@ -96,9 +107,24 @@ internal class DownloadedMediaViewModel(
     val audioPlaying = player.isPlaying
     val audioPositionMs = player.positionMs
     val audioDurationMs = player.durationMs
+    val audioError = player.error
+    private val _audioPlayRequested = MutableStateFlow(false)
+    val audioPlayRequested: StateFlow<Boolean> = _audioPlayRequested.asStateFlow()
     private var playbackRecorded = false
+    private var pendingPositionMs = 0L
+    private val playbackActionGate = PlaybackActionGate()
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val watched = services.history.isWatched(videoId)
+                _uiState.update { it.copy(watched = it.watched || watched) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // A completion lookup must not prevent playback; marking reports write failures.
+            }
+        }
         viewModelScope.launch(Dispatchers.IO) {
             services.downloads.observeAll().collect { downloads ->
                 _uiState.update { state ->
@@ -114,51 +140,149 @@ internal class DownloadedMediaViewModel(
     }
 
     fun toggleAudio() {
-        val download = _uiState.value.download
-            ?.takeIf { it.kind == DownloadKind.AUDIO && it.state == DownloadState.COMPLETE }
-            ?: return
-        if (player.isPlaying.value) {
+        if (_uiState.value.changingPlayback) return
+        if (_audioPlayRequested.value) {
+            _audioPlayRequested.value = false
             player.pause()
             return
         }
+        val positionMs = if (_uiState.value.audioStarted) player.positionMs.value else pendingPositionMs
+        startAudio(positionMs, playWhenReady = true)
+    }
+
+    private fun startAudio(positionMs: Long, playWhenReady: Boolean) {
+        val download = _uiState.value.download
+            ?.takeIf { !it.isShort && it.state == DownloadState.COMPLETE }
+            ?: return
+        if (!beginPlaybackAction()) return
         viewModelScope.launch {
             try {
                 val file = services.downloads.localFile(download)
-                    ?: error("The downloaded audio file is missing.")
+                    ?: error("The downloaded file is missing. Download it again to play it.")
                 if (!player.awaitReady()) error("Audio player is unavailable.")
-                if (!_uiState.value.audioStarted) {
-                    player.setMediaQueue(
-                        listOf(
-                            LightAudioItem(
-                                source = LightAudioSource.FileSource(file),
-                                metadata = LightMediaMetadata(
-                                    title = download.title,
-                                    artist = download.author,
-                                    album = "Lightious Downloads",
-                                    durationMs = download.lengthSeconds
-                                        .takeIf { it > 0L }
-                                        ?.times(1_000L),
-                                ),
-                            ),
+                // Retain the handoff position even if preparing the new queue fails.
+                pendingPositionMs = positionMs.coerceAtLeast(0L)
+                _audioPlayRequested.value = false
+                _uiState.update { it.copy(audioStarted = false) }
+                prepareAudioAt(
+                    player = player,
+                    item = LightAudioItem(
+                        source = LightAudioSource.FileSource(file),
+                        metadata = LightMediaMetadata(
+                            title = download.title,
+                            artist = download.author,
+                            album = "Lightious Downloads",
+                            durationMs = download.lengthSeconds
+                                .takeIf { it > 0L }
+                                ?.times(1_000L),
                         ),
-                    )
-                    _uiState.update { it.copy(audioStarted = true) }
-                }
+                    ),
+                    positionMs = pendingPositionMs,
+                )
+                _uiState.update { it.copy(audioStarted = true, finished = false) }
                 recordPlayback(download)
-                player.play()
+                _audioPlayRequested.value = playWhenReady
+                if (playWhenReady) player.play()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 _uiState.update { it.copy(errorMessage = error.userMessage("Could not play this download.")) }
+            } finally {
+                finishPlaybackAction()
             }
         }
     }
 
-    fun localVideoSource(): VideoPlaybackSource.Single? {
-        val download = _uiState.value.download ?: return null
-        val source = services.downloads.localVideoSource(download) ?: return null
-        recordPlayback(download)
-        return source
+    fun watch(onReady: (VideoPlaybackSource.Single, PlaybackStart) -> Unit) {
+        val download = _uiState.value.download
+            ?.takeIf { downloadedMediaPrimaryAction(it) == DownloadPrimaryAction.WATCH_VIDEO }
+            ?: return
+        if (!beginPlaybackAction()) return
+        try {
+            val source = services.downloads.localVideoSource(download)
+                ?: error("The downloaded file is missing. Download it again to play it.")
+            val start = videoStartFromAudio(
+                audioStarted = _uiState.value.audioStarted,
+                audioPositionMs = player.positionMs.value,
+                audioPlaying = _audioPlayRequested.value,
+                savedPositionMs = pendingPositionMs,
+            )
+            pendingPositionMs = start.positionMs
+            _uiState.update { it.copy(audioStarted = false, finished = false) }
+            _audioPlayRequested.value = false
+            player.pause()
+            player.setMediaQueue(emptyList())
+            recordPlayback(download)
+            onReady(source, start)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            _uiState.update { it.copy(errorMessage = error.userMessage("Could not play this download.")) }
+        } finally {
+            finishPlaybackAction()
+        }
+    }
+
+    fun onVideoResult(result: VideoPlaybackResult) {
+        when (result) {
+            is VideoPlaybackResult.Stopped -> pendingPositionMs = result.positionMs
+            is VideoPlaybackResult.Listen -> {
+                pendingPositionMs = result.positionMs
+                startAudio(result.positionMs, result.playWhenReady)
+            }
+            VideoPlaybackResult.Finished -> playbackFinished()
+        }
+    }
+
+    fun saveVideoPosition(positionMs: Long) {
+        pendingPositionMs = positionMs.coerceAtLeast(0L)
+    }
+
+    fun playbackFinished() {
+        _audioPlayRequested.value = false
+        player.pause()
+        _uiState.update { it.copy(finished = true) }
+    }
+
+    fun markWatched() {
+        val state = _uiState.value
+        if (state.watched || state.savingWatched) return
+        val video = state.download?.asVideoSummary() ?: return
+        _uiState.update { it.copy(savingWatched = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            var markedLocally = false
+            try {
+                services.history.markWatched(video)
+                markedLocally = true
+                // Offline completion is durable before attempting optional network sync.
+                val settings = services.settings.load()
+                val account = services.accounts.load(settings.instanceUrl)
+                services.historySyncer.queueWatched(video, settings, account)
+                _uiState.update { it.copy(watched = true, savingWatched = false) }
+                services.historySyncer.syncWatched(video, settings, account)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (!markedLocally) {
+                    _uiState.update {
+                        it.copy(errorMessage = error.userMessage("Could not mark watched. Please try again."))
+                    }
+                }
+            } finally {
+                _uiState.update { it.copy(watched = it.watched || markedLocally, savingWatched = false) }
+            }
+        }
+    }
+
+    private fun beginPlaybackAction(): Boolean {
+        if (!playbackActionGate.tryAcquire()) return false
+        _uiState.update { it.copy(changingPlayback = true, errorMessage = null) }
+        return true
+    }
+
+    private fun finishPlaybackAction() {
+        playbackActionGate.release()
+        _uiState.update { it.copy(changingPlayback = false) }
     }
 
     fun retry() {
@@ -190,7 +314,9 @@ internal class DownloadedMediaViewModel(
 
     fun delete() {
         cancelScheduledDownload(ownerDeviceId, videoId)
+        _audioPlayRequested.value = false
         player.pause()
+        player.setMediaQueue(emptyList())
         viewModelScope.launch(Dispatchers.IO) {
             services.downloads.delete(ownerDeviceId, videoId)
         }
@@ -248,8 +374,49 @@ internal class DownloadedMediaScreen(
         val colors by LightThemeController.colors.collectAsState()
         val state by viewModel.uiState.collectAsState()
         val audioPlaying by viewModel.audioPlaying.collectAsState()
+        val audioPlayRequested by viewModel.audioPlayRequested.collectAsState()
         val audioPositionMs by viewModel.audioPositionMs.collectAsState()
         val audioDurationMs by viewModel.audioDurationMs.collectAsState()
+        val audioError by viewModel.audioError.collectAsState()
+        val presentingAudio = downloadedMediaPresentsAudio(state)
+        val onWatch: () -> Unit = {
+            viewModel.watch { source, start ->
+                navigateTo(
+                    screenFactory = { activity ->
+                        VideoPlaybackScreen(
+                            sealedActivity = activity,
+                            playbackSource = source,
+                            initialPositionMs = start.positionMs,
+                            playWhenReady = start.playWhenReady,
+                            canListen = true,
+                            onPositionSaved = viewModel::saveVideoPosition,
+                        )
+                    },
+                    resultCallback = viewModel::onVideoResult,
+                )
+            }
+        }
+
+        LaunchedEffect(
+            state.audioStarted,
+            audioPlaying,
+            audioPositionMs,
+            audioDurationMs,
+            audioError,
+            state.changingPlayback,
+        ) {
+            if (audioPlaybackFinished(
+                    started = state.audioStarted,
+                    playing = audioPlaying,
+                    positionMs = audioPositionMs,
+                    durationMs = audioDurationMs,
+                    failed = audioError != null,
+                    changingPlayback = state.changingPlayback,
+                )
+            ) {
+                viewModel.playbackFinished()
+            }
+        }
 
         LightTheme(colors = colors) {
             Box(
@@ -264,8 +431,21 @@ internal class DownloadedMediaScreen(
                             onClick = { goBack() },
                             contentDescription = "Back",
                         ),
-                        center = LightTopBarCenter.Text("Offline"),
-                        rightButton = state.download?.let {
+                        center = LightTopBarCenter.Text(
+                            when {
+                                state.finished -> "Finished"
+                                presentingAudio -> "Listen"
+                                else -> "Offline"
+                            },
+                        ),
+                        rightButton = if (state.finished) {
+                            null
+                        } else if (presentingAudio && state.download?.kind == DownloadKind.VIDEO) {
+                            LightBarButton.Text(
+                                text = "WATCH",
+                                onClick = onWatch.takeUnless { state.changingPlayback },
+                            )
+                        } else state.download?.let {
                             LightBarButton.LightIcon(
                                 icon = LightIcons.DELETE,
                                 onClick = {
@@ -290,34 +470,34 @@ internal class DownloadedMediaScreen(
                             )
                         },
                     )
-                    DownloadedMediaContent(
-                        state = state,
-                        audioPositionMs = audioPositionMs,
-                        audioDurationMs = audioDurationMs,
-                        modifier = Modifier.weight(1f),
-                    )
-                    DownloadedMediaActions(
-                        state = state,
-                        audioPlaying = audioPlaying,
-                        onAudio = viewModel::toggleAudio,
-                        onWatch = {
-                            val source = viewModel.localVideoSource()
-                            if (source != null) {
-                                navigateTo(
-                                    screenFactory = { activity ->
-                                        VideoPlaybackScreen(
-                                            sealedActivity = activity,
-                                            playbackSource = source,
-                                        )
-                                    },
-                                )
-                            }
-                        },
-                        onRetry = viewModel::retry,
-                        onCancel = viewModel::cancel,
-                        onSkipBack = viewModel::skipBack,
-                        onSkipForward = viewModel::skipForward,
-                    )
+                    if (state.finished) {
+                        PlaybackFinishedContent(
+                            title = state.download?.title.orEmpty(),
+                            watched = state.watched,
+                            saving = state.savingWatched,
+                            onMarkWatched = viewModel::markWatched,
+                            onClose = { goBack() },
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        DownloadedMediaContent(
+                            state = state,
+                            audioPositionMs = audioPositionMs,
+                            audioDurationMs = audioDurationMs,
+                            audioError = audioError?.let { "Audio failed: ${it.kind}: ${it.diagnostic}" },
+                            modifier = Modifier.weight(1f),
+                        )
+                        DownloadedMediaActions(
+                            state = state,
+                            audioPlaying = audioPlayRequested,
+                            onAudio = viewModel::toggleAudio,
+                            onWatch = onWatch,
+                            onRetry = viewModel::retry,
+                            onCancel = viewModel::cancel,
+                            onSkipBack = viewModel::skipBack,
+                            onSkipForward = viewModel::skipForward,
+                        )
+                    }
                 }
                 state.errorMessage?.let { message ->
                     LightFullscreenModal(message = message, onClose = viewModel::dismissError)
@@ -332,14 +512,31 @@ private fun DownloadedMediaContent(
     state: DownloadedMediaUiState,
     audioPositionMs: Long,
     audioDurationMs: Long,
+    audioError: String?,
     modifier: Modifier = Modifier,
 ) {
+    val download = state.download
+    if (download != null && downloadedMediaPresentsAudio(state)) {
+        AudioPlaybackContent(
+            title = download.title,
+            author = download.author,
+            detailLines = listOf(downloadStatusLabel(download)),
+            positionMs = audioPositionMs,
+            durationMs = resolvedAudioDurationMs(
+                playerDurationMs = audioDurationMs,
+                metadataDurationSeconds = download.lengthSeconds,
+            ),
+            errorMessage = audioError,
+            modifier = modifier,
+        )
+        return
+    }
+
     LightScrollView(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 1f.gridUnitsAsDp()),
     ) {
-        val download = state.download
         when {
             !state.loaded -> LightText(
                 text = "Loading download…",
@@ -371,14 +568,6 @@ private fun DownloadedMediaContent(
                     monospace = true,
                     modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
                 )
-                if (state.audioStarted) {
-                    LightText(
-                        text = "LISTENING  ${playbackTimeLabel(audioPositionMs, audioDurationMs)}",
-                        variant = LightTextVariant.Fine,
-                        monospace = true,
-                        modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
-                    )
-                }
                 download.errorMessage?.let { message ->
                     LightText(
                         text = message,
@@ -402,28 +591,27 @@ private fun DownloadedMediaActions(
     onSkipBack: () -> Unit,
     onSkipForward: () -> Unit,
 ) {
-    when (downloadedMediaPrimaryAction(state.download)) {
+    val primaryAction = if (downloadedMediaPresentsAudio(state)) {
+        DownloadPrimaryAction.PLAY_AUDIO
+    } else {
+        downloadedMediaPrimaryAction(state.download)
+    }
+    when (primaryAction) {
         DownloadPrimaryAction.PLAY_AUDIO -> LightBottomBar(
-            items = listOf(
-                LightBarButton.LightIcon(
-                    icon = LightIcons.SKIP_BACKWARD_FIFTEEN,
-                    onClick = onSkipBack.takeIf { state.audioStarted },
-                    contentDescription = "Back 15 seconds",
-                ),
-                LightBarButton.LightIcon(
-                    icon = if (audioPlaying) LightIcons.PAUSE else LightIcons.PLAY,
-                    onClick = onAudio,
-                    contentDescription = if (audioPlaying) "Pause" else "Play",
-                ),
-                LightBarButton.LightIcon(
-                    icon = LightIcons.SKIP_FORWARD_FIFTEEN,
-                    onClick = onSkipForward.takeIf { state.audioStarted },
-                    contentDescription = "Forward 15 seconds",
-                ),
+            items = playbackTransportItems(
+                playing = audioPlaying,
+                canSeek = state.audioStarted && !state.changingPlayback,
+                playPauseEnabled = !state.changingPlayback,
+                onSeekBack = onSkipBack,
+                onTogglePlayback = onAudio,
+                onSeekForward = onSkipForward,
             ),
         )
         DownloadPrimaryAction.WATCH_VIDEO -> LightBottomBar(
-            items = listOf(LightBarButton.Text(text = "WATCH", onClick = onWatch)),
+            items = listOf(
+                LightBarButton.Text(text = "WATCH", onClick = onWatch.takeUnless { state.changingPlayback }),
+                LightBarButton.Text(text = "LISTEN", onClick = onAudio.takeUnless { state.changingPlayback }),
+            ),
         )
         DownloadPrimaryAction.CANCEL -> LightBottomBar(
             items = listOf(LightBarButton.Text(text = "CANCEL", onClick = onCancel)),

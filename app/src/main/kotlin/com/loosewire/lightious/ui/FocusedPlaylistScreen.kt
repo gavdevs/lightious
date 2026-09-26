@@ -13,7 +13,6 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewModelScope
 import com.loosewire.lightious.LightiousServices
 import com.loosewire.lightious.data.ClientSettings
-import com.loosewire.lightious.data.ExperienceMode
 import com.loosewire.lightious.data.FocusedLibraryFilter
 import com.loosewire.lightious.data.FocusedPlaylistEntry
 import com.loosewire.lightious.data.FocusedVideoEntry
@@ -74,12 +73,6 @@ class FocusedPlaylistViewModel(
                 }
                 return@launch
             }
-            if (profile.mode != ExperienceMode.FOCUSED) {
-                _uiState.update {
-                    it.copy(mode = FocusedPlaylistMode.Failed("Focused mode is no longer enabled."))
-                }
-                return@launch
-            }
             val playlist = profile.focusedPlaylists().firstOrNull { entry -> entry.id == playlistId }
             _uiState.update {
                 it.copy(
@@ -130,9 +123,9 @@ class FocusedPlaylistScreen(
                         ),
                         center = LightTopBarCenter.Text("Playlist"),
                         rightButton = LightBarButton.LightIcon(
-                            icon = LightIcons.REFRESH,
-                            onClick = viewModel::load,
-                            contentDescription = "Refresh",
+                            icon = LightIcons.ELLIPSES,
+                            onClick = { openOptions(state.filter) },
+                            contentDescription = "Playlist options",
                         ),
                     )
                     when (val mode = state.mode) {
@@ -144,7 +137,6 @@ class FocusedPlaylistScreen(
                         is FocusedPlaylistMode.Loaded -> FocusedPlaylistContent(
                             playlist = mode.playlist,
                             selectedFilter = state.filter,
-                            onFilter = viewModel::selectFilter,
                             onVideo = { video ->
                                 navigateTo(
                                     screenFactory = { activity ->
@@ -158,13 +150,36 @@ class FocusedPlaylistScreen(
             }
         }
     }
+
+    private fun openOptions(selectedFilter: FocusedLibraryFilter) {
+        navigateTo(
+            screenFactory = { activity ->
+                FocusedOptionsScreen(
+                    sealedActivity = activity,
+                    title = "Playlist Options",
+                    selectedFilter = selectedFilter,
+                    leadingActions = listOf(FocusedOptionsAction.REFRESH),
+                )
+            },
+            resultCallback = { result ->
+                when (result) {
+                    is FocusedOptionsResult.SelectFilter -> viewModel.selectFilter(result.filter)
+                    is FocusedOptionsResult.RunAction -> when (result.action) {
+                        FocusedOptionsAction.REFRESH -> viewModel.load()
+                        FocusedOptionsAction.SEARCH,
+                        FocusedOptionsAction.SETTINGS,
+                        -> Unit
+                    }
+                }
+            },
+        )
+    }
 }
 
 @Composable
 private fun FocusedPlaylistContent(
     playlist: FocusedPlaylistEntry,
     selectedFilter: FocusedLibraryFilter,
-    onFilter: (FocusedLibraryFilter) -> Unit,
     onVideo: (FocusedVideoEntry) -> Unit,
 ) {
     val videos = playlist.videosWithPolicy()
@@ -175,7 +190,6 @@ private fun FocusedPlaylistContent(
             variant = LightTextVariant.Subheading,
             modifier = Modifier.padding(horizontal = 1f.gridUnitsAsDp()),
         )
-        FocusedFilterRow(selectedFilter = selectedFilter, onFilter = onFilter)
         LightScrollView(
             modifier = Modifier
                 .weight(1f)

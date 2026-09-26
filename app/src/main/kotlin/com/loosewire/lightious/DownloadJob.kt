@@ -3,10 +3,8 @@ package com.loosewire.lightious
 import com.loosewire.lightious.data.DownloadKind
 import com.loosewire.lightious.data.DownloadState
 import com.loosewire.lightious.data.DownloadTimeSlice
-import com.loosewire.lightious.data.ExperienceMode
 import com.loosewire.lightious.data.InvidiousApi
 import com.loosewire.lightious.data.MediaDownloadClient
-import com.loosewire.lightious.data.PlaybackPolicy
 import com.loosewire.lightious.data.downloadJobTag
 import com.loosewire.lightious.data.extractYouTubeVideoId
 import com.loosewire.lightious.data.isRetryableDownloadFailure
@@ -54,11 +52,8 @@ val lightiousDownloadJob: LightJobHandler = { context, input ->
                     deviceBearer = session.deviceBearer,
                     audioLanguage = settings.audioLanguage,
                 ).use { api -> api.video(videoId).getOrThrow() }
-                val policy = if (profile.mode == ExperienceMode.EXPLORE) {
-                    PlaybackPolicy.WATCH_AND_LISTEN
-                } else {
-                    profile.playbackPolicyFor(details.summary.videoId, details.summary.authorId)
-                } ?: error("This video is no longer in your Focused library.")
+                val policy = profile.playbackPolicyFor(details.summary.videoId, details.summary.authorId)
+                    ?: error("This video is no longer in your library.")
                 val plan = selectDownloadPlan(details, policy, settings.audioLanguage).getOrThrow()
                 require(plan.kind == requestedKind) {
                     "Download permissions changed. Retry from the refreshed video page."

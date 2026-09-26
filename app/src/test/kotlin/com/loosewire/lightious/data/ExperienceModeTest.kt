@@ -2,6 +2,11 @@ package com.loosewire.lightious.data
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class ExperienceModeTest {
     @Test
@@ -12,16 +17,16 @@ class ExperienceModeTest {
     }
 
     @Test
-    fun `keeps an explicit explore profile as the fallback experience`() {
+    fun `keeps an explicit library profile as the fallback experience`() {
         val profile = CompanionProfile(
             deviceId = "device",
             account = "account",
             revision = 1,
-            mode = ExperienceMode.EXPLORE,
+            mode = ExperienceMode.LIBRARY,
             items = emptyList(),
         )
 
-        assertEquals(ExperienceMode.EXPLORE, profile.effectiveExperienceMode())
+        assertEquals(ExperienceMode.LIBRARY, profile.effectiveExperienceMode())
     }
 
     @Test
@@ -32,21 +37,35 @@ class ExperienceModeTest {
             account = "account",
             deviceBearer = "credential",
         )
-        val staleExplore = CompanionState(
+        val staleLibrary = CompanionState(
             session = session,
             profile = CompanionProfile(
                 deviceId = "device",
                 account = "account",
                 revision = 1,
-                mode = ExperienceMode.EXPLORE,
+                mode = ExperienceMode.LIBRARY,
                 items = emptyList(),
             ),
         )
 
-        val failClosed = staleExplore.withoutUnverifiedProfile()
+        val failClosed = staleLibrary.withoutUnverifiedProfile()
 
         assertEquals(session, failClosed.session)
         assertEquals(null, failClosed.profile)
         assertEquals(ExperienceMode.FOCUSED, failClosed.profile.effectiveExperienceMode())
+    }
+
+    @Test
+    fun `old explore values migrate to library and current modes round trip`() {
+        assertEquals(ExperienceMode.LIBRARY, ExperienceMode.fromWire("explore"))
+        assertEquals(ExperienceMode.LIBRARY, Json.decodeFromString<ExperienceMode>("\"EXPLORE\""))
+        assertEquals(ExperienceMode.LIBRARY, Json.decodeFromString<ExperienceMode>("\"explore\""))
+        ExperienceMode.entries.forEach { mode ->
+            assertEquals(mode, Json.decodeFromString<ExperienceMode>(Json.encodeToString(mode)))
+        }
+        assertEquals(null, ExperienceMode.fromWire("unknown"))
+        assertFailsWith<SerializationException> {
+            Json.decodeFromString<ExperienceMode>("\"UNKNOWN\"")
+        }
     }
 }

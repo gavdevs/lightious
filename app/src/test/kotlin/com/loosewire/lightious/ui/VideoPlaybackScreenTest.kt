@@ -12,6 +12,62 @@ import kotlin.test.assertTrue
 
 class VideoPlaybackScreenTest {
     @Test
+    fun listenHandoffStopsVideoBeforeReturningItsPositionAndPlayingIntent() {
+        val events = mutableListOf<Any>()
+        val exit = VideoPlaybackExit(
+            stopPlayback = { events += "video stopped" },
+            returnResult = { events += it },
+        )
+
+        // playWhenReady stays true while buffering even though isPlaying is false.
+        exit.listen(positionMs = 73_000L, playWhenReady = true)
+
+        assertEquals(
+            listOf("video stopped", VideoPlaybackResult.Listen(73_000L, playWhenReady = true)),
+            events,
+        )
+    }
+
+    @Test
+    fun listenHandoffPreservesPausedPlayback() {
+        val results = mutableListOf<VideoPlaybackResult>()
+        val exit = VideoPlaybackExit(stopPlayback = {}, returnResult = { results += it })
+
+        exit.listen(positionMs = 73_000L, playWhenReady = false)
+
+        assertEquals(listOf<VideoPlaybackResult>(VideoPlaybackResult.Listen(73_000L, playWhenReady = false)), results)
+    }
+
+    @Test
+    fun backKeepsThePositionWithoutStartingAudio() {
+        val results = mutableListOf<VideoPlaybackResult>()
+        val exit = VideoPlaybackExit(stopPlayback = {}, returnResult = { results += it })
+
+        exit.stop(positionMs = 73_000L)
+
+        assertEquals(listOf<VideoPlaybackResult>(VideoPlaybackResult.Stopped(73_000L, playWhenReady = false)), results)
+    }
+
+    @Test
+    fun completionAndLateCallbacksCanOnlyReturnOneResult() {
+        val events = mutableListOf<Any>()
+        lateinit var exit: VideoPlaybackExit
+        exit = VideoPlaybackExit(
+            stopPlayback = {
+                events += "video stopped"
+                exit.finish()
+            },
+            returnResult = { events += it },
+        )
+
+        exit.finish()
+        exit.stop(positionMs = 90_000L)
+        exit.listen(positionMs = 90_000L, playWhenReady = true)
+
+        assertEquals(listOf("video stopped", VideoPlaybackResult.Finished), events)
+    }
+
+    @Test
     fun formatsShortAndLongDurations() {
         assertEquals("00:00", formatPlaybackTime(0L))
         assertEquals("01:05", formatPlaybackTime(65_999L))

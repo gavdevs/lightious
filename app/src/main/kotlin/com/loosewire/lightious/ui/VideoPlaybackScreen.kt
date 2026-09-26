@@ -74,18 +74,45 @@ import kotlinx.coroutines.isActive
 class VideoPlaybackScreen(
     sealedActivity: SealedLightActivity,
     private val playbackSource: VideoPlaybackSource,
-) : SimpleLightScreen<Unit>(sealedActivity) {
+    private val initialPositionMs: Long = 0L,
+    private val playWhenReady: Boolean = true,
+    private val canListen: Boolean = false,
+    private val onPositionSaved: (Long) -> Unit = {},
+) : SimpleLightScreen<VideoPlaybackResult>(sealedActivity) {
     private var player: ExoPlayer? = null
     private var videoTexture: TextureView? = null
+    private val playbackExit = VideoPlaybackExit(
+        stopPlayback = ::releasePlayer,
+        returnResult = { result -> super.goBack(result) },
+    )
+
+    override fun goBack(result: VideoPlaybackResult?) {
+        playbackExit.stop(player?.currentPosition ?: initialPositionMs)
+    }
+
+    private fun switchToListen() {
+        if (!canListen) return
+        playbackExit.listen(
+            positionMs = player?.currentPosition ?: initialPositionMs,
+            playWhenReady = player?.playWhenReady ?: playWhenReady,
+        )
+    }
 
     override fun willHide() {
-        videoTexture?.keepScreenOn = false
-        player?.pause()
+        pauseAndSavePosition()
     }
 
     override fun onAppPause() {
+        pauseAndSavePosition()
+    }
+
+    private fun pauseAndSavePosition() {
         videoTexture?.keepScreenOn = false
-        player?.pause()
+        player?.let {
+            // System Back invokes this SDK lifecycle hook without a typed result.
+            onPositionSaved(it.currentPosition.coerceAtLeast(0L))
+            it.pause()
+        }
     }
 
     override fun onScreenDestroy() {
@@ -95,9 +122,9 @@ class VideoPlaybackScreen(
     @Composable
     override fun Content() {
         val colors by LightThemeController.colors.collectAsState()
-        var playing by remember { mutableStateOf(false) }
+        var playing by remember { mutableStateOf(playWhenReady) }
         var ready by remember { mutableStateOf(false) }
-        var positionMs by remember { mutableLongStateOf(0L) }
+        var positionMs by remember { mutableLongStateOf(initialPositionMs.coerceAtLeast(0L)) }
         var durationMs by remember { mutableLongStateOf(C.TIME_UNSET) }
         var errorMessage by remember { mutableStateOf<String?>(null) }
         var fullscreen by remember { mutableStateOf(false) }
@@ -115,13 +142,17 @@ class VideoPlaybackScreen(
         val listener = remember {
             object : Player.Listener {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    playing = isPlaying
                     videoTexture?.keepScreenOn = shouldKeepVideoScreenOn(isPlaying)
+                }
+
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                    playing = playWhenReady
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     ready = playbackState == Player.STATE_READY
                     player?.let { durationMs = it.duration }
+                    if (playbackState == Player.STATE_ENDED) playbackExit.finish()
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
@@ -180,6 +211,11 @@ class VideoPlaybackScreen(
                                 contentDescription = "Back",
                             ),
                             center = LightTopBarCenter.Text("Watch"),
+                            rightButton = if (canListen) {
+                                LightBarButton.Text(text = "LISTEN", onClick = ::switchToListen)
+                            } else {
+                                null
+                            },
                         )
                     }
 
@@ -202,7 +238,9 @@ class VideoPlaybackScreen(
                                     TextureView(context).also { texture ->
                                         videoTexture = texture
                                         texture.keepScreenOn = false
-                                        player = ExoPlayer.Builder(context).build().apply {
+                                        val newPlayer = ExoPlayer.Builder(context).build()
+                                        player = newPlayer
+                                        newPlayer.apply {
                                             setHandleAudioBecomingNoisy(true)
                                             setAudioAttributes(
                                                 AudioAttributes.Builder()
@@ -221,8 +259,9 @@ class VideoPlaybackScreen(
                                                 is VideoPlaybackSource.Separate ->
                                                     setMediaSource(source.toMergedMediaSource())
                                             }
+                                            seekTo(initialPositionMs.coerceAtLeast(0L))
+                                            playWhenReady = this@VideoPlaybackScreen.playWhenReady
                                             prepare()
-                                            playWhenReady = true
                                         }
                                     }
                                 },
@@ -309,7 +348,7 @@ class VideoPlaybackScreen(
     }
 
     private fun togglePlayback() {
-        player?.let { if (it.isPlaying) it.pause() else it.play() }
+        player?.let { if (it.playWhenReady) it.pause() else it.play() }
     }
 
     private fun seekBy(deltaMs: Long) {
@@ -393,23 +432,14 @@ internal fun playbackBottomBarItems(
     onTogglePlayback: () -> Unit,
     onSeekForward: () -> Unit,
     onToggleFullscreen: () -> Unit,
-): List<LightBarButton> = listOf(
-    LightBarButton.LightIcon(
-        icon = LightIcons.SKIP_BACKWARD_FIFTEEN,
-        onClick = onSeekBack.takeIf { ready },
-        contentDescription = "Back 15 seconds",
-    ),
-    LightBarButton.LightIcon(
-        icon = if (playing) LightIcons.PAUSE else LightIcons.PLAY,
-        onClick = onTogglePlayback,
-        contentDescription = if (playing) "Pause" else "Play",
-    ),
-    LightBarButton.LightIcon(
-        icon = LightIcons.SKIP_FORWARD_FIFTEEN,
-        onClick = onSeekForward.takeIf { ready },
-        contentDescription = "Forward 15 seconds",
-    ),
-    LightBarButton.Icon(
+): List<LightBarButton> = playbackTransportItems(
+    playing = playing,
+    canSeek = ready,
+    playPauseEnabled = true,
+    onSeekBack = onSeekBack,
+    onTogglePlayback = onTogglePlayback,
+    onSeekForward = onSeekForward,
+    trailingItem = LightBarButton.Icon(
         painter = fullscreenPainter,
         onClick = onToggleFullscreen,
         contentDescription = if (fullscreen) "Exit fullscreen" else "Enter fullscreen",
