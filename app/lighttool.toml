@@ -1,6 +1,7 @@
 [tool]
 id = "com.loosewire.lightious"
 label = "Lightious"
+icon = "@mipmap/ic_lightious_launcher"
 versionCode = 6
 versionName = "0.4.0"
 permissions = ["android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE", "android.permission.WAKE_LOCK"]
