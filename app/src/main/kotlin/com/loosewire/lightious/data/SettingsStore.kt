@@ -89,6 +89,12 @@ class SettingsStore(
         }
     }
 
+    suspend fun setFocusedChannelDisplay(display: FocusedChannelDisplay) {
+        dataStore.edit { preferences ->
+            preferences[FOCUSED_CHANNEL_DISPLAY] = display.name
+        }
+    }
+
     private fun settingsFromPreferences(preferences: Preferences): ClientSettings {
         val storedInstance = preferences[INSTANCE_URL]
         val customInstanceUrl = storedInstance
@@ -115,6 +121,9 @@ class SettingsStore(
                     AudioLanguagePreference.entries.firstOrNull { it.name == stored }
                 }
                 ?: AudioLanguagePreference.ORIGINAL,
+            focusedChannelDisplay = preferences[FOCUSED_CHANNEL_DISPLAY]
+                ?.let(FocusedChannelDisplay::fromName)
+                ?: FocusedChannelDisplay.ALL_VIDEOS,
         )
     }
 
@@ -138,5 +147,6 @@ class SettingsStore(
         val SAVE_WATCH_HISTORY = booleanPreferencesKey("save_watch_history")
         val SYNC_ACCOUNT_HISTORY = booleanPreferencesKey("sync_account_history")
         val AUDIO_LANGUAGE = stringPreferencesKey("audio_language")
+        val FOCUSED_CHANNEL_DISPLAY = stringPreferencesKey("focused_channel_display")
     }
 }

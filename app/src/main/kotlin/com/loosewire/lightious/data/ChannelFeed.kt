@@ -40,3 +40,29 @@ fun CompanionProfile.channelFeedEntries(
             )
         }
 }
+
+/** One channel's already-selected release window, for grouped display. */
+data class ChannelFeedGroup(
+    val channel: FocusedChannelEntry,
+    val videos: List<FocusedVideoEntry>,
+)
+
+/**
+ * Groups the merged release window back per channel. Watched filtering is
+ * applied here, after the window was selected, so a grouped row can honestly
+ * report how many of its videos remain available on this phone.
+ */
+fun CompanionProfile.channelFeedGroups(
+    videos: List<VideoSummary>,
+    watchedVideoIds: Set<String>,
+): List<ChannelFeedGroup> {
+    val byChannelId = focusedChannels().associateBy(FocusedChannelEntry::channelId)
+    return channelFeedEntries(videos, watchedVideoIds)
+        .groupBy { entry -> entry.video.authorId }
+        .mapNotNull { (channelId, entries) ->
+            byChannelId[channelId]?.let { channel ->
+                ChannelFeedGroup(channel = channel, videos = entries.sortedByDescending { entry -> entry.video.published })
+            }
+        }
+        .sortedByDescending { group -> group.videos.maxOfOrNull { entry -> entry.video.published } ?: 0L }
+}

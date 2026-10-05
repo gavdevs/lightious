@@ -16,7 +16,9 @@ searching those approved channels. Both modes keep the same curated permissions.
   progress, seek, and detached playback controls.
 - Switch between Watch and Listen without losing your position or in-app
   play/pause choice, including video downloads.
-- End playback on a quiet screen with explicit Mark Watched and Close actions.
+- Mark a video watched from its details page, the listen-only/audio player,
+  offline media details, or the finished-playback screen—explicitly, never
+  automatically.
 - Show loading/connecting while a companion request is pending, with retry
   controls only after the request fails.
 - Keep optional local watch history, separate from explicit watched status.
@@ -30,6 +32,13 @@ searching those approved channels. Both modes keep the same curated permissions.
   through five and turn hiding watched videos on or off.
 - Hide manually watched videos only after selecting each channel's recent
   window, so watching a video never fills its place with an older upload.
+- Never let a Short occupy or fill a per-channel window slot: the server
+  resolves candidates against real video metadata before selecting the
+  window, so a confirmed Short is skipped and quarantined instead of
+  consuming one of the channel's limited slots.
+- Show the Channels tab either as one merged release list or grouped by
+  channel with each channel's remaining unwatched count; tapping a grouped
+  channel opens just that channel's limited release window.
 - Keep deliberately saved videos, private playlists, and downloads available
   from LightOS-style bottom navigation.
 - In Library mode, browse and search the complete catalog of an allowed channel
@@ -54,17 +63,20 @@ automatic public-instance rotation.
 
 Focused uses the newest available upload/replay window, not an unread archive.
 For six saved channels and a limit of three, it can show up to eighteen videos;
-marking one watched reduces that list until newer uploads arrive. Shorts,
-current livestreams, and upcoming premieres are excluded. Partial channel
+marking one watched reduces that list until newer uploads arrive. Shorts
+never occupy or fill a window slot, and livestreams and upcoming premieres are
+excluded. Partial channel
 failures are shown with a retry action instead of being reported as an empty
 feed. No feed pagination, daily schedule, time limit, or completion counts are
 added.
 
 Watched status is stored on this phone and changes only when you select **Mark
-Watched**. It works with watch history and optional account-history sync turned
-off. Starting playback or closing a video does not mark it watched. Saved videos
-and playlists remain available even when their videos disappear from the channel
-feed. Completion is not synchronized between phones.
+Watched** on a video's details page, the listen-only/audio player, offline
+media details, or its finished-playback screen. It works with watch history
+and optional account-history sync turned off. Starting playback or closing a
+video does not mark it watched. Saved videos and playlists remain available
+even when their videos disappear from the channel feed. Completion is not
+synchronized between phones.
 
 The companion/server changes must be deployed together with the new client.
 An older server will show a feed error until it provides

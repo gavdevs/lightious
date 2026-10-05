@@ -374,6 +374,7 @@ class FocusedChannelScreen(
             resultCallback = { result ->
                 when (result) {
                     is FocusedOptionsResult.SelectFilter -> viewModel.selectFilter(result.filter)
+                    is FocusedOptionsResult.SelectChannelDisplay -> Unit
                     is FocusedOptionsResult.RunAction -> when (result.action) {
                         FocusedOptionsAction.SEARCH -> loaded?.let { mode ->
                             navigateTo(

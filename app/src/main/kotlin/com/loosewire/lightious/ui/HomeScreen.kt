@@ -25,14 +25,17 @@ import com.loosewire.lightious.data.CuratedVideo
 import com.loosewire.lightious.data.DownloadedMedia
 import com.loosewire.lightious.data.downloadJobTag
 import com.loosewire.lightious.data.ExperienceMode
-import com.loosewire.lightious.data.FocusedChannelEntry
+import com.loosewire.lightious.data.ChannelFeedGroup
+import com.loosewire.lightious.data.FocusedChannelDisplay
 import com.loosewire.lightious.data.FocusedLibraryFilter
+import com.loosewire.lightious.data.FocusedChannelEntry
 import com.loosewire.lightious.data.FocusedPlaylistEntry
 import com.loosewire.lightious.data.FocusedVideoEntry
 import com.loosewire.lightious.data.HomePage
 import com.loosewire.lightious.data.InvidiousApi
 import com.loosewire.lightious.data.effectiveExperienceMode
 import com.loosewire.lightious.data.channelFeedEntries
+import com.loosewire.lightious.data.channelFeedGroups
 import com.loosewire.lightious.data.focusedChannels
 import com.loosewire.lightious.data.focusedPlaylists
 import com.loosewire.lightious.data.normalizeInstanceUrl
@@ -91,6 +94,7 @@ data class HomeUiState(
     val downloads: List<DownloadedMedia> = emptyList(),
     val focusedTab: FocusedHomeTab = FocusedHomeTab.CHANNELS,
     val focusedFilter: FocusedLibraryFilter = FocusedLibraryFilter.ALL,
+    val channelDisplay: FocusedChannelDisplay = FocusedChannelDisplay.ALL_VIDEOS,
     val channelFeed: HomeChannelFeedState = HomeChannelFeedState.Loading,
     val watchedVideoIds: Set<String> = emptySet(),
     val mode: HomeMode = HomeMode.Loading("Loading…"),
@@ -159,6 +163,7 @@ class HomeViewModel(
                 }
                 return@launch
             }
+            _uiState.update { it.copy(channelDisplay = settings.focusedChannelDisplay) }
             if (settings.instanceUrl.isBlank()) {
                 showInstanceEditor("")
                 return@launch
@@ -295,6 +300,20 @@ class HomeViewModel(
         _uiState.update { state -> state.copy(focusedFilter = filter) }
     }
 
+    fun selectChannelDisplay(display: FocusedChannelDisplay) {
+        _uiState.update { state -> state.copy(channelDisplay = display) }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                services.settings.setFocusedChannelDisplay(display)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // The in-memory choice still applies; the next load re-reads
+                // whatever was persisted.
+            }
+        }
+    }
+
     private fun showInstanceEditor(initialValue: String, error: String? = null) {
         editorSession += 1
         _uiState.update {
@@ -361,15 +380,18 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
                     HomeMode.Ready -> FocusedHomeContent(
                         profile = companionProfile,
                         experienceMode = experienceMode,
+                        settings = state.settings,
                         channelFeed = state.channelFeed,
                         watchedVideoIds = state.watchedVideoIds,
                         downloads = pairedDownloads,
                         paired = state.companion.session != null,
                         selectedTab = state.focusedTab,
                         selectedFilter = state.focusedFilter,
+                        channelDisplay = state.channelDisplay,
                         onVideo = ::openFocusedVideo,
                         onFeedVideo = ::openFeedVideo,
                         onChannel = ::openFocusedChannel,
+                        onChannelGroup = ::openChannelGroup,
                         onPlaylist = ::openFocusedPlaylist,
                         onDownload = ::openDownload,
                         onTab = viewModel::selectFocusedTab,
@@ -400,12 +422,14 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
                     sealedActivity = activity,
                     title = "Library Options",
                     selectedFilter = state.focusedFilter,
+                    selectedChannelDisplay = state.channelDisplay,
                     trailingActions = listOf(FocusedOptionsAction.REFRESH, FocusedOptionsAction.SETTINGS),
                 )
             },
             resultCallback = { result ->
                 when (result) {
                     is FocusedOptionsResult.SelectFilter -> viewModel.selectFocusedFilter(result.filter)
+                    is FocusedOptionsResult.SelectChannelDisplay -> viewModel.selectChannelDisplay(result.display)
                     is FocusedOptionsResult.RunAction -> when (result.action) {
                         FocusedOptionsAction.SEARCH -> {
                             val current = viewModel.uiState.value
@@ -435,6 +459,15 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
         navigateTo(
             screenFactory = { activity ->
                 FocusedChannelScreen(activity, services, viewModel.uiState.value.settings, channel)
+            },
+        )
+    }
+
+    private fun openChannelGroup(group: ChannelFeedGroup) {
+        val state = viewModel.uiState.value
+        navigateTo(
+            screenFactory = { activity ->
+                FocusedChannelReleasesScreen(activity, services, state.settings, group, state.focusedFilter)
             },
         )
     }
@@ -482,15 +515,18 @@ class HomeScreen(sealedActivity: SealedLightActivity) :
 private fun FocusedHomeContent(
     profile: CompanionProfile?,
     experienceMode: ExperienceMode,
+    settings: ClientSettings,
     channelFeed: HomeChannelFeedState,
     watchedVideoIds: Set<String>,
     downloads: List<DownloadedMedia>,
     paired: Boolean,
     selectedTab: FocusedHomeTab,
     selectedFilter: FocusedLibraryFilter,
+    channelDisplay: FocusedChannelDisplay,
     onVideo: (CuratedVideo) -> Unit,
     onFeedVideo: (FocusedVideoEntry) -> Unit,
     onChannel: (FocusedChannelEntry) -> Unit,
+    onChannelGroup: (ChannelFeedGroup) -> Unit,
     onPlaylist: (FocusedPlaylistEntry) -> Unit,
     onDownload: (DownloadedMedia) -> Unit,
     onTab: (FocusedHomeTab) -> Unit,
@@ -560,7 +596,9 @@ private fun FocusedHomeContent(
                         state = channelFeed,
                         watchedVideoIds = watchedVideoIds,
                         filter = selectedFilter,
+                        channelDisplay = channelDisplay,
                         onVideo = onFeedVideo,
+                        onChannelGroup = onChannelGroup,
                         onRetry = onRefresh,
                     )
                 } else if (channels.isEmpty()) {
@@ -613,7 +651,9 @@ private fun FocusedChannelFeedContent(
     state: HomeChannelFeedState,
     watchedVideoIds: Set<String>,
     filter: FocusedLibraryFilter,
+    channelDisplay: FocusedChannelDisplay,
     onVideo: (FocusedVideoEntry) -> Unit,
+    onChannelGroup: (ChannelFeedGroup) -> Unit,
     onRetry: () -> Unit,
 ) {
     if (profile == null) return
@@ -627,7 +667,34 @@ private fun FocusedChannelFeedContent(
             FocusedEmptyMessage(state.message)
             ActionRow("RETRY", onRetry)
         }
-        is HomeChannelFeedState.Loaded -> {
+        is HomeChannelFeedState.Loaded -> if (channelDisplay == FocusedChannelDisplay.BY_CHANNEL) {
+            val groups = profile.channelFeedGroups(state.page.videos, watchedVideoIds)
+                .mapNotNull { group ->
+                    val watchable = group.videos.filter { entry -> filter.includes(entry.playbackPolicy) }
+                    if (watchable.isEmpty()) null else group.copy(videos = watchable)
+                }
+            if (state.page.failedChannelIds.isNotEmpty()) {
+                FocusedEmptyMessage("Some channels could not be refreshed.")
+                ActionRow("RETRY", onRetry)
+            }
+            if (groups.isEmpty() && state.page.failedChannelIds.isEmpty()) {
+                FocusedEmptyMessage(
+                    when {
+                        filter != FocusedLibraryFilter.ALL -> "No recent releases match this filter."
+                        profile.hideWatched -> "No recent unwatched videos."
+                        else -> "No recent videos."
+                    },
+                )
+            }
+            groups.forEach { group ->
+                ChannelFeedGroupRow(
+                    channel = group.channel,
+                    unwatchedCount = group.videos.size,
+                    limit = profile.channelFeedLimit,
+                    onClick = { onChannelGroup(group) },
+                )
+            }
+        } else {
             val entries = profile.channelFeedEntries(state.page.videos, watchedVideoIds)
                 .filter { entry -> filter.includes(entry.playbackPolicy) }
             if (state.page.failedChannelIds.isNotEmpty()) {

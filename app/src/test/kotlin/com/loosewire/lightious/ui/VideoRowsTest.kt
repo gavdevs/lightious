@@ -1,5 +1,7 @@
 package com.loosewire.lightious.ui
 
+import com.loosewire.lightious.data.FocusedChannelEntry
+import com.loosewire.lightious.data.PlaybackPolicy
 import com.loosewire.lightious.data.VideoSummary
 import com.loosewire.lightious.data.FocusedLibraryFilter
 import kotlin.test.Test
@@ -36,4 +38,21 @@ class VideoRowsTest {
 
         assertEquals("LIVE  ·  1.2K views  ·  now", videoMetadataLine(video))
     }
+
+    @Test
+    fun buildsChannelGroupMetadataWithPluralCountsAndPolicy() {
+        val listenOnly = channel(channelPolicy = PlaybackPolicy.LISTEN_ONLY)
+        val watchable = channel(channelPolicy = PlaybackPolicy.WATCH_AND_LISTEN)
+
+        assertEquals("1 VIDEO OF 3 UNWATCHED  ·  LISTEN ONLY", channelFeedGroupMetadataLine(listenOnly, 1, 3))
+        assertEquals("2 VIDEOS OF 5 UNWATCHED  ·  WATCH", channelFeedGroupMetadataLine(watchable, 2, 5))
+    }
+
+    private fun channel(channelPolicy: PlaybackPolicy) = FocusedChannelEntry(
+        channelId = "UCXuqSBlHAE6Xw-yeJA0Tunw",
+        name = "Channel",
+        thumbnailUrl = null,
+        channelPolicy = channelPolicy,
+        curatedVideos = emptyList(),
+    )
 }

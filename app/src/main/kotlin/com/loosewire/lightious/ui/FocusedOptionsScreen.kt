@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import com.loosewire.lightious.data.FocusedChannelDisplay
 import com.loosewire.lightious.data.FocusedLibraryFilter
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
@@ -34,6 +35,8 @@ internal enum class FocusedOptionsAction {
 internal sealed interface FocusedOptionsResult {
     data class SelectFilter(val filter: FocusedLibraryFilter) : FocusedOptionsResult
 
+    data class SelectChannelDisplay(val display: FocusedChannelDisplay) : FocusedOptionsResult
+
     data class RunAction(val action: FocusedOptionsAction) : FocusedOptionsResult
 }
 
@@ -46,6 +49,7 @@ internal data class FocusedOptionEntry(
 internal data class FocusedOptionsModel(
     val leadingActions: List<FocusedOptionEntry>,
     val filters: List<FocusedOptionEntry>,
+    val channelDisplay: List<FocusedOptionEntry> = emptyList(),
     val trailingActions: List<FocusedOptionEntry>,
 )
 
@@ -55,8 +59,14 @@ internal val focusedFilterDisplayOrder = listOf(
     FocusedLibraryFilter.LISTEN,
 )
 
+internal val focusedChannelDisplayOrder = listOf(
+    FocusedChannelDisplay.ALL_VIDEOS,
+    FocusedChannelDisplay.BY_CHANNEL,
+)
+
 internal fun focusedOptionsModel(
     selectedFilter: FocusedLibraryFilter?,
+    selectedChannelDisplay: FocusedChannelDisplay? = null,
     leadingActions: List<FocusedOptionsAction> = emptyList(),
     trailingActions: List<FocusedOptionsAction> = emptyList(),
 ) = FocusedOptionsModel(
@@ -70,6 +80,15 @@ internal fun focusedOptionsModel(
             )
         }
     }.orEmpty(),
+    channelDisplay = selectedChannelDisplay?.let { selected ->
+        focusedChannelDisplayOrder.map { display ->
+            FocusedOptionEntry(
+                label = display.displayLabel(),
+                result = FocusedOptionsResult.SelectChannelDisplay(display),
+                selected = display == selected,
+            )
+        }
+    }.orEmpty(),
     trailingActions = trailingActions.map { action -> action.asEntry() },
 )
 
@@ -77,13 +96,19 @@ internal class FocusedOptionsScreen(
     sealedActivity: SealedLightActivity,
     private val title: String,
     private val selectedFilter: FocusedLibraryFilter?,
+    private val selectedChannelDisplay: FocusedChannelDisplay? = null,
     private val leadingActions: List<FocusedOptionsAction> = emptyList(),
     private val trailingActions: List<FocusedOptionsAction> = emptyList(),
 ) : SimpleLightScreen<FocusedOptionsResult>(sealedActivity) {
     @Composable
     override fun Content() {
         val colors by LightThemeController.colors.collectAsState()
-        val model = focusedOptionsModel(selectedFilter, leadingActions, trailingActions)
+        val model = focusedOptionsModel(
+            selectedFilter,
+            selectedChannelDisplay,
+            leadingActions,
+            trailingActions,
+        )
 
         LightTheme(colors = colors) {
             Column(
@@ -113,6 +138,15 @@ internal class FocusedOptionsScreen(
                             modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
                         )
                         model.filters.forEach { entry -> OptionRow(entry) }
+                    }
+                    if (model.channelDisplay.isNotEmpty()) {
+                        LightText(
+                            text = "VIEW",
+                            variant = LightTextVariant.Fine,
+                            lighten = true,
+                            modifier = Modifier.padding(top = 0.5f.gridUnitsAsDp()),
+                        )
+                        model.channelDisplay.forEach { entry -> OptionRow(entry) }
                     }
                     model.trailingActions.forEach { entry -> OptionRow(entry) }
                 }
@@ -145,6 +179,11 @@ internal fun FocusedLibraryFilter.filterLabel(): String = when (this) {
     FocusedLibraryFilter.ALL -> "ALL"
     FocusedLibraryFilter.LISTEN -> "AUDIO"
     FocusedLibraryFilter.WATCH -> "VIDEO"
+}
+
+internal fun FocusedChannelDisplay.displayLabel(): String = when (this) {
+    FocusedChannelDisplay.ALL_VIDEOS -> "ALL VIDEOS"
+    FocusedChannelDisplay.BY_CHANNEL -> "BY CHANNEL"
 }
 
 private fun FocusedOptionsAction.asEntry() = FocusedOptionEntry(

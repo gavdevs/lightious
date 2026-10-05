@@ -149,6 +149,17 @@ class SettingsStoreTest {
     }
 
     @Test
+    fun `persists the focused channel display preference`() = runTest {
+        val store = createStore(File.createTempFile("lightious-settings", ".preferences_pb"))
+
+        assertEquals(FocusedChannelDisplay.ALL_VIDEOS, store.load().focusedChannelDisplay)
+
+        store.setFocusedChannelDisplay(FocusedChannelDisplay.BY_CHANNEL)
+
+        assertEquals(FocusedChannelDisplay.BY_CHANNEL, store.load().focusedChannelDisplay)
+    }
+
+    @Test
     fun `does not persist an invalid instance`() = runTest {
         val store = createStore(File.createTempFile("lightious-settings", ".preferences_pb"))
 

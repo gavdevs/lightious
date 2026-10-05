@@ -92,6 +92,36 @@ class ChannelFeedTest {
         assertTrue(watchable.isEmpty())
     }
 
+    @Test
+    fun `groups report unwatched counts against the window and omit fully watched channels`() {
+        val videos = listOf(
+            video(1), video(2), video(3),
+            video(4, CHANNEL_B), video(5, CHANNEL_B), video(6, CHANNEL_B),
+        )
+        val profile = profile()
+
+        val groups = profile.channelFeedGroups(videos, setOf(id(3), id(4), id(5), id(6)))
+
+        assertEquals(1, groups.size)
+        assertEquals(listOf(id(2), id(1)), groups.single().videos.map { entry -> entry.video.videoId })
+    }
+
+    @Test
+    fun `groups sort by their newest release and each group lists its videos newest first`() {
+        val videos = listOf(
+            video(1), video(2),
+            video(3, CHANNEL_B), video(4, CHANNEL_B), video(5, CHANNEL_B),
+        )
+
+        val groups = profile().channelFeedGroups(videos, emptySet())
+
+        assertEquals(
+            listOf(CHANNEL_B, CHANNEL_A),
+            groups.map { group -> group.channel.channelId },
+        )
+        assertEquals(listOf(id(5), id(4), id(3)), groups.first().videos.map { entry -> entry.video.videoId })
+    }
+
     private fun profile() = CompanionProfile(
         deviceId = "device",
         account = "account",

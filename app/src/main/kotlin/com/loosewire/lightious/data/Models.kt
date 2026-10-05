@@ -18,6 +18,17 @@ enum class HomePage {
     POPULAR,
 }
 
+enum class FocusedChannelDisplay {
+    ALL_VIDEOS,
+    BY_CHANNEL,
+    ;
+
+    companion object {
+        fun fromName(value: String): FocusedChannelDisplay? =
+            entries.firstOrNull { it.name == value }
+    }
+}
+
 val DEFAULT_HOME_PAGES: List<HomePage> = listOf(
     HomePage.SEARCH,
     HomePage.ACCOUNT_FEED,
@@ -35,6 +46,7 @@ data class ClientSettings(
     val saveWatchHistory: Boolean = true,
     val syncAccountHistory: Boolean = false,
     val audioLanguage: AudioLanguagePreference = AudioLanguagePreference.ORIGINAL,
+    val focusedChannelDisplay: FocusedChannelDisplay = FocusedChannelDisplay.ALL_VIDEOS,
 )
 
 enum class AudioLanguagePreference(

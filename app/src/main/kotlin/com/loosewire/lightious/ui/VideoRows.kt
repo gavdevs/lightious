@@ -70,6 +70,20 @@ internal fun ChannelRow(
 }
 
 @Composable
+internal fun ChannelFeedGroupRow(
+    channel: FocusedChannelEntry,
+    unwatchedCount: Int,
+    limit: Int,
+    onClick: () -> Unit,
+) {
+    LibraryRow(
+        title = channel.name,
+        detail = channelFeedGroupMetadataLine(channel, unwatchedCount, limit),
+        onClick = onClick,
+    )
+}
+
+@Composable
 internal fun PlaylistRow(
     playlist: FocusedPlaylistEntry,
     onClick: () -> Unit,
@@ -158,6 +172,16 @@ internal fun channelMetadataLine(channel: FocusedChannelEntry): String =
 
 internal fun playlistMetadataLine(playlist: FocusedPlaylistEntry): String =
     "${playlist.items.size} ${if (playlist.items.size == 1) "VIDEO" else "VIDEOS"}"
+
+internal fun channelFeedGroupMetadataLine(
+    channel: FocusedChannelEntry,
+    unwatchedCount: Int,
+    limit: Int,
+): String {
+    val policy = channel.channelPolicy?.let(PlaybackPolicy::shortLabel)
+    val count = "$unwatchedCount ${if (unwatchedCount == 1) "VIDEO" else "VIDEOS"} OF $limit UNWATCHED"
+    return if (policy != null) "$count  ·  $policy" else count
+}
 
 internal fun PlaybackPolicy.shortLabel(): String = when (this) {
     PlaybackPolicy.LISTEN_ONLY -> "LISTEN ONLY"

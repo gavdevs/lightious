@@ -1,5 +1,6 @@
 package com.loosewire.lightious.ui
 
+import com.loosewire.lightious.data.FocusedChannelDisplay
 import com.loosewire.lightious.data.FocusedLibraryFilter
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -39,12 +40,30 @@ class FocusedOptionsScreenTest {
     }
 
     @Test
-    fun `filter section can be omitted for action-only menus`() {
+    fun `display choices are shown only when a selected display is provided`() {
         val model = focusedOptionsModel(
-            selectedFilter = null,
-            leadingActions = listOf(FocusedOptionsAction.SETTINGS),
+            selectedFilter = FocusedLibraryFilter.ALL,
+            selectedChannelDisplay = FocusedChannelDisplay.BY_CHANNEL,
         )
 
-        assertTrue(model.filters.isEmpty())
+        assertEquals(
+            listOf(FocusedChannelDisplay.ALL_VIDEOS, FocusedChannelDisplay.BY_CHANNEL),
+            model.channelDisplay.map { entry ->
+                (entry.result as FocusedOptionsResult.SelectChannelDisplay).display
+            },
+        )
+        assertEquals(listOf("ALL VIDEOS", "BY CHANNEL"), model.channelDisplay.map(FocusedOptionEntry::label))
+        assertTrue(model.channelDisplay.single { entry -> entry.label == "BY CHANNEL" }.selected)
+        assertFalse(model.channelDisplay.single { entry -> entry.label == "ALL VIDEOS" }.selected)
+    }
+
+    @Test
+    fun `display section can be omitted for menus without a display choice`() {
+        val model = focusedOptionsModel(
+            selectedFilter = FocusedLibraryFilter.ALL,
+            selectedChannelDisplay = null,
+        )
+
+        assertTrue(model.channelDisplay.isEmpty())
     }
 }
