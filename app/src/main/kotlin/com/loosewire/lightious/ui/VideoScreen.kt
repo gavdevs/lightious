@@ -581,13 +581,18 @@ class VideoScreen(
                                             metadataDurationSeconds = mode.details.summary.lengthSeconds,
                                         ),
                                         errorMessage = audioError?.let { "Audio failed: ${it.kind}: ${it.diagnostic}" },
-                                        modifier = Modifier.weight(1f),
+                                        watched = state.watched,
+                                        savingWatched = state.savingWatched,
+                                        onMarkWatched = viewModel::markWatched,
                                     )
                                 } else {
                                     VideoDetailsContent(
                                         details = mode.details,
                                         playbackPolicy = mode.playbackPolicy,
                                         download = state.download,
+                                        watched = state.watched,
+                                        savingWatched = state.savingWatched,
+                                        onMarkWatched = viewModel::markWatched,
                                         modifier = Modifier.weight(1f),
                                     )
                                 }
@@ -743,6 +748,9 @@ private fun VideoDetailsContent(
     details: VideoDetails,
     playbackPolicy: PlaybackPolicy,
     download: DownloadedMedia?,
+    watched: Boolean,
+    savingWatched: Boolean,
+    onMarkWatched: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LightScrollView(
@@ -794,6 +802,12 @@ private fun VideoDetailsContent(
                 )
             }
         }
+        WatchedMark(
+            watched = watched,
+            savingWatched = savingWatched,
+            onMarkWatched = onMarkWatched,
+            modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
+        )
         if (details.description.isNotBlank()) {
             LightText(
                 text = details.description,

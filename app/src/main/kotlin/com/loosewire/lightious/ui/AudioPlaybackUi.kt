@@ -30,6 +30,9 @@ internal fun AudioPlaybackContent(
     positionMs: Long,
     durationMs: Long,
     errorMessage: String?,
+    watched: Boolean,
+    savingWatched: Boolean,
+    onMarkWatched: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -74,6 +77,12 @@ internal fun AudioPlaybackContent(
                     modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
                 )
             }
+            WatchedMark(
+                watched = watched,
+                savingWatched = savingWatched,
+                onMarkWatched = onMarkWatched,
+                modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
+            )
         }
 
         AudioPlaybackTimeline(

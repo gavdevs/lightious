@@ -485,6 +485,7 @@ internal class DownloadedMediaScreen(
                             audioPositionMs = audioPositionMs,
                             audioDurationMs = audioDurationMs,
                             audioError = audioError?.let { "Audio failed: ${it.kind}: ${it.diagnostic}" },
+                            onMarkWatched = viewModel::markWatched,
                             modifier = Modifier.weight(1f),
                         )
                         DownloadedMediaActions(
@@ -513,6 +514,7 @@ private fun DownloadedMediaContent(
     audioPositionMs: Long,
     audioDurationMs: Long,
     audioError: String?,
+    onMarkWatched: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val download = state.download
@@ -527,6 +529,9 @@ private fun DownloadedMediaContent(
                 metadataDurationSeconds = download.lengthSeconds,
             ),
             errorMessage = audioError,
+            watched = state.watched,
+            savingWatched = state.savingWatched,
+            onMarkWatched = onMarkWatched,
             modifier = modifier,
         )
         return
@@ -575,6 +580,12 @@ private fun DownloadedMediaContent(
                         modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
                     )
                 }
+                WatchedMark(
+                    watched = state.watched,
+                    savingWatched = state.savingWatched,
+                    onMarkWatched = onMarkWatched,
+                    modifier = Modifier.padding(top = 0.75f.gridUnitsAsDp()),
+                )
             }
         }
     }

@@ -51,16 +51,17 @@ import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightIcons
-import com.thelightphone.sdk.ui.LightProgressBar
-import com.thelightphone.sdk.ui.LightScrollBarPosition
-import com.thelightphone.sdk.ui.LightScrollView
-import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.LightTheme
 import com.thelightphone.sdk.ui.LightThemeController
 import com.thelightphone.sdk.ui.LightThemeTokens
 import com.thelightphone.sdk.ui.LightTopBar
 import com.thelightphone.sdk.ui.LightTopBarCenter
+import com.thelightphone.sdk.ui.LightProgressBar
+import com.thelightphone.sdk.ui.LightScrollBarPosition
+import com.thelightphone.sdk.ui.LightScrollView
+import com.thelightphone.sdk.ui.LightText
+import com.thelightphone.sdk.ui.LightTouchableProgressBar
+import com.thelightphone.sdk.ui.LightTextVariant
 import com.thelightphone.sdk.ui.gridUnitsAsDp
 import com.thelightphone.sdk.ui.lightClickable
 import kotlinx.coroutines.delay
@@ -131,6 +132,8 @@ class VideoPlaybackScreen(
         var displayAspectRatio by remember(playbackSource) {
             mutableStateOf(playbackSource.initialVideoAspectRatio())
         }
+        var scrubDragPositionMs by remember { mutableStateOf<Long?>(null) }
+        val displayedPositionMs = scrubDragPositionMs ?: positionMs
         val videoScrollState = rememberScrollState()
         val fullscreenPainter = remember(colors.content, fullscreen) {
             FullscreenCornersPainter(
@@ -183,6 +186,16 @@ class VideoPlaybackScreen(
                     durationMs = it.duration
                 }
                 delay(500)
+            }
+        }
+
+        LaunchedEffect(scrubDragPositionMs) {
+            if (scrubDragPositionMs == null) return@LaunchedEffect
+            delay(SCRUB_COMMIT_DELAY_MS)
+            scrubDragPositionMs?.let { target ->
+                seekToPosition(target)
+                positionMs = target
+                scrubDragPositionMs = null
             }
         }
 
@@ -305,13 +318,23 @@ class VideoPlaybackScreen(
                                     .fillMaxWidth()
                                     .padding(top = 0.75f.gridUnitsAsDp()),
                             ) {
-                                LightProgressBar(
-                                    colors = colors,
-                                    progress = playbackProgress(positionMs, durationMs),
-                                )
+                                if (durationMs > 0L) {
+                                    LightTouchableProgressBar(
+                                        colors = colors,
+                                        progress = playbackProgress(displayedPositionMs, durationMs),
+                                        onValueChange = { fraction ->
+                                            scrubDragPositionMs = (fraction * durationMs).toLong()
+                                        },
+                                    )
+                                } else {
+                                    LightProgressBar(
+                                        colors = colors,
+                                        progress = playbackProgress(displayedPositionMs, durationMs),
+                                    )
+                                }
                             }
                             LightText(
-                                text = playbackTimeLabel(positionMs, durationMs),
+                                text = playbackTimeLabel(displayedPositionMs, durationMs),
                                 variant = LightTextVariant.Superfine,
                                 monospace = true,
                                 lighten = true,
@@ -354,8 +377,12 @@ class VideoPlaybackScreen(
     private fun seekBy(deltaMs: Long) {
         player?.let {
             val upperBound = it.duration.takeIf { duration -> duration > 0L } ?: Long.MAX_VALUE
-            it.seekTo((it.currentPosition + deltaMs).coerceIn(0L, upperBound))
+            seekToPosition((it.currentPosition + deltaMs).coerceIn(0L, upperBound))
         }
+    }
+
+    private fun seekToPosition(positionMs: Long) {
+        player?.seekTo(positionMs.coerceAtLeast(0L))
     }
 
     private fun releasePlayer() {
@@ -482,6 +509,7 @@ private class FullscreenCornersPainter(
     }
 }
 
+private const val SCRUB_COMMIT_DELAY_MS = 200L
 private const val DEFAULT_VIDEO_ASPECT_RATIO = 16f / 9f
 
 internal fun videoAspectRatio(
