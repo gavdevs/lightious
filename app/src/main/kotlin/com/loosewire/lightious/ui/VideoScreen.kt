@@ -37,6 +37,7 @@ import com.thelightphone.sdk.audio.LightAudioPlayback
 import com.thelightphone.sdk.audio.LightAudioSource
 import com.thelightphone.sdk.audio.LightAudioUsage
 import com.thelightphone.sdk.audio.LightMediaMetadata
+import com.thelightphone.sdk.audio.LightPlayerSpec
 import com.thelightphone.sdk.ui.LightBarButton
 import com.thelightphone.sdk.ui.LightBottomBar
 import com.thelightphone.sdk.ui.LightFullscreenModal
@@ -87,10 +88,7 @@ class VideoViewModel(
     private val scheduleDownload: (String, String, DownloadKind) -> Boolean,
     private val cancelScheduledDownload: (String, String) -> Unit,
 ) : LightViewModel<Unit>() {
-    private val player = audio.newPlayer(
-        usage = LightAudioUsage.Speech,
-        playback = LightAudioPlayback.Detached,
-    )
+    private val player = audio.newPlayer(LightPlayerSpec(usage = LightAudioUsage.Speech, playback = LightAudioPlayback.Detached))
 
     private val _uiState = MutableStateFlow(VideoUiState())
     val uiState: StateFlow<VideoUiState> = _uiState.asStateFlow()
@@ -292,8 +290,8 @@ class VideoViewModel(
         }
     }
 
-    fun skipAudioBack() = player.skipBack()
-    fun skipAudioForward() = player.skipForward()
+    fun skipAudioBack() = player.seekTo(skippedPosition(player.positionMs.value, -SKIP_INTERVAL_MS))
+    fun skipAudioForward() = player.seekTo(skippedPosition(player.positionMs.value, SKIP_INTERVAL_MS))
 
     fun download() {
         if (_uiState.value.mode !is VideoMode.Loaded || !beginPlaybackAction()) return

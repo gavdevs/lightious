@@ -31,7 +31,7 @@ val lightiousDownloadJob: LightJobHandler = { context, input ->
         downloadJobTag(ownerDeviceId, videoId, requestedKind)
     }.isSuccess
     if (!validInput || extractYouTubeVideoId(videoId) != videoId) {
-        LightJobResult.Error(mapOf("message" to "Invalid download request."))
+        LightJobResult.Error("Invalid download request.")
     } else {
         val services = LightiousServices.from(context)
         try {
@@ -39,7 +39,7 @@ val lightiousDownloadJob: LightJobHandler = { context, input ->
             val queued = services.downloads.get(ownerDeviceId, videoId)
                 ?: error("This download was removed.")
             if (queued.kind != requestedKind || queued.state == DownloadState.CANCELLED) {
-                LightJobResult.Success(mapOf("videoId" to videoId))
+                LightJobResult.Success(mapOf("videoId" to videoId), outputFilePath = null, message = null)
             } else {
                 val settings = services.settings.load()
                 val active = services.companion.loadActiveState(settings.instanceUrl).getOrThrow()
@@ -100,14 +100,14 @@ val lightiousDownloadJob: LightJobHandler = { context, input ->
                 } else {
                     services.downloads.markComplete(ownerDeviceId, videoId, target, requestedKind)
                 }
-                LightJobResult.Success(mapOf("videoId" to videoId))
+                LightJobResult.Success(mapOf("videoId" to videoId), outputFilePath = null, message = null)
             }
         } catch (error: CancellationException) {
             // Keep a valid partial for Range resume. Explicit cancel/delete and
             // policy reconciliation clean their own files before stopping work.
             throw error
         } catch (_: DownloadStoppedException) {
-            LightJobResult.Success(mapOf("videoId" to videoId))
+            LightJobResult.Success(mapOf("videoId" to videoId), outputFilePath = null, message = null)
         } catch (error: Exception) {
             val retryable = error.isRetryableDownloadFailure()
             if (retryable) {
@@ -126,10 +126,8 @@ val lightiousDownloadJob: LightJobHandler = { context, input ->
                     requestedKind,
                 )
                 LightJobResult.Error(
-                    mapOf(
-                        "videoId" to videoId,
-                        "message" to (error.message ?: "Download failed.").take(300),
-                    ),
+                    (error.message ?: "Download failed.").take(300),
+                    mapOf("videoId" to videoId),
                 )
             }
         }

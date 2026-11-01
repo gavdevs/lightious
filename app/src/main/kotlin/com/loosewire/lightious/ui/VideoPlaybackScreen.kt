@@ -560,6 +560,22 @@ internal fun playbackProgress(positionMs: Long, durationMs: Long): Float {
         .coerceIn(0f, 1f)
 }
 
+/** How far the skip buttons move, matching their fifteen-second icons. */
+internal const val SKIP_INTERVAL_MS = 15_000L
+
+/**
+ * Where a skip lands. The player clamps to the item once the duration is known,
+ * but computing it here keeps a forward skip off a negative or unbounded value
+ * while the duration is still loading.
+ */
+internal fun skippedPosition(positionMs: Long, deltaMs: Long): Long {
+    val target = positionMs + deltaMs
+    // Adding can overflow past Long.MAX_VALUE, which would land negative and
+    // rewind instead of advancing.
+    if (deltaMs > 0 && target < positionMs) return Long.MAX_VALUE
+    return target.coerceAtLeast(0L)
+}
+
 internal fun playbackTimeLabel(positionMs: Long, durationMs: Long): String {
     val hasKnownDuration = durationMs != C.TIME_UNSET && durationMs > 0L
     val boundedPositionMs = if (hasKnownDuration) {

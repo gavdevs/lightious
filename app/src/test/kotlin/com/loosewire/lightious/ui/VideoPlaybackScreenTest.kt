@@ -81,6 +81,25 @@ class VideoPlaybackScreenTest {
     }
 
     @Test
+    fun skipsByFifteenSeconds() {
+        assertEquals(45_000L, skippedPosition(30_000L, SKIP_INTERVAL_MS))
+        assertEquals(15_000L, skippedPosition(30_000L, -SKIP_INTERVAL_MS))
+    }
+
+    @Test
+    fun skipBackwardsStopsAtTheStart() {
+        assertEquals(0L, skippedPosition(5_000L, -SKIP_INTERVAL_MS))
+        assertEquals(0L, skippedPosition(0L, -SKIP_INTERVAL_MS))
+    }
+
+    @Test
+    fun skipForwardsDoesNotWrapPastTheEnd() {
+        // The player clamps to the item duration; this only has to stay sane.
+        assertEquals(20_000L, skippedPosition(5_000L, SKIP_INTERVAL_MS))
+        assertEquals(Long.MAX_VALUE, skippedPosition(Long.MAX_VALUE, SKIP_INTERVAL_MS))
+    }
+
+    @Test
     fun clampsKnownPlaybackLabelsToTheDuration() {
         assertEquals("00:00  /  01:00", playbackTimeLabel(-1L, 60_000L))
         assertEquals("01:00  /  01:00", playbackTimeLabel(90_000L, 60_000L))
